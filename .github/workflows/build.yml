@@ -75,19 +75,27 @@ jobs:
           Write-Output "::notice title=Установщик::установка, проезд, обновление и удаление — в порядке"
 
       - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: logs
-          retention-days: 7
-          path: |
-            install.log
-            update.log
-            C:\ProgramData\AvtoVes\logs\
-      - uses: actions/upload-artifact@v4
         with:
           name: AvtoVes-Setup-${{ inputs.version }}
           retention-days: 30
           path: dist/*
+
+      # журналы установки и службы — в папку проекта (загрузка берёт файлы только оттуда)
+      - name: Собрать журналы
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-logs | Out-Null
+          Copy-Item install.log, update.log ci-logs -ErrorAction SilentlyContinue
+          Copy-Item C:\ProgramData\AvtoVes\logs\* ci-logs -ErrorAction SilentlyContinue
+          Copy-Item C:\ProgramData\AvtoVes\data\avtoves.log ci-logs -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: logs
+          retention-days: 7
+          path: ci-logs/
 
   release:
     needs: windows
