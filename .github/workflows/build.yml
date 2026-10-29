@@ -46,12 +46,24 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           # ждём только сам установщик (Start-Process -Wait ждёт и все порождённые процессы)
+          function LogTail($file, $stage) {
+            if (Test-Path $file) {
+              Get-Content $file -Encoding UTF8 -Tail 25 | ForEach-Object { Write-Output "::warning title=$stage (журнал)::$_" }
+            }
+          }
           function Setup($argv, $stage) {
             $t0 = Get-Date
+            $log = ($argv | Where-Object { $_ -like '/LOG=*' }) -replace '^/LOG=', ''
             $p = Start-Process $setup -ArgumentList $argv -PassThru
-            if (-not $p.WaitForExit(600000)) { Write-Output "::error title=$stage::установщик не завершился за 10 минут"; Stop-Process -Id $p.Id -Force; exit 1 }
+            if (-not $p.WaitForExit(600000)) {
+              Write-Output "::error title=$stage::установщик не завершился за 10 минут"
+              Get-Process | Where-Object { $_.StartTime -gt $t0 } | ForEach-Object { Write-Output "::warning title=Процессы::$($_.Name) $($_.Path)" }
+              LogTail $log $stage
+              Stop-Process -Id $p.Id -Force; exit 1
+            }
             Write-Output "::notice title=$stage::установщик завершился за $([int]((Get-Date)-$t0).TotalSeconds) с, код $($p.ExitCode)"
-            if ($p.ExitCode -ne 0) { Write-Output "::error title=$stage::код установщика $($p.ExitCode)"; exit 1 }
+            if ($p.ExitCode -ne 0) { Write-Output "::error title=$stage::код установщика $($p.ExitCode)"; LogTail $log $stage; exit 1 }
+            Get-Content $log -Encoding UTF8 | Select-String 'WebView2|AvtoVesService|setup_config|netsh' | Select-Object -Last 12 | ForEach-Object { Write-Output "::notice title=$stage (журнал)::$($_.Line)" }
           }
           New-Item -ItemType Directory -Force ci-logs | Out-Null
           $setup = "dist\AvtoVes-Setup-$env:V.exe"

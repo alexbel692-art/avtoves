@@ -427,13 +427,36 @@ begin
     (RegQueryStringValue(HKCU, 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', V) and (V <> '') and (V <> '0.0.0.0'));
 end;
 
+// Среда WebView2 ставится в фоне: ждём не больше 2 минут, остальное установщик Microsoft доделает сам.
+// Пока её нет, программа откроется окном Microsoft Edge.
 procedure EnsureWebView2();
+var
+  RC, I: Integer;
 begin
-  if WebView2Installed() then Exit;
-  WizardForm.StatusLabel.Caption := 'Установка компонента Microsoft WebView2 (нужен интернет)...';
+  if WebView2Installed() then
+  begin
+    Log('WebView2 уже установлен');
+    Exit;
+  end;
+  WizardForm.StatusLabel.Caption := 'Установка компонента Microsoft WebView2...';
   ExtractTemporaryFile('MicrosoftEdgeWebview2Setup.exe');
-  if RunCmd(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), '/silent /install', True) <> 0 then
-    Log('WebView2 не установился — программа откроется через Microsoft Edge или браузер');
+  // копия во временную папку Windows: {tmp} удаляется в конце установки, а установщик WebView2 может работать дольше
+  FileCopy(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), ExpandConstant('{win}\Temp\AvtoVes-WebView2Setup.exe'), False);
+  if not Exec(ExpandConstant('{win}\Temp\AvtoVes-WebView2Setup.exe'), '/silent /install', '', SW_HIDE, ewNoWait, RC) then
+  begin
+    Log('WebView2: установщик не запустился');
+    Exit;
+  end;
+  for I := 1 to 60 do
+  begin
+    if WebView2Installed() then
+    begin
+      Log('WebView2 установлен');
+      Exit;
+    end;
+    Sleep(2000);
+  end;
+  Log('WebView2 ещё устанавливается в фоне');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
