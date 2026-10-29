@@ -42,8 +42,17 @@ jobs:
       # установка «только программа оператора».
       - name: Проверка установки
         shell: pwsh
+        timeout-minutes: 30
         run: |
           $ErrorActionPreference = "Stop"
+          # ждём только сам установщик (Start-Process -Wait ждёт и все порождённые процессы)
+          function Setup($argv, $stage) {
+            $t0 = Get-Date
+            $p = Start-Process $setup -ArgumentList $argv -PassThru
+            if (-not $p.WaitForExit(600000)) { Write-Output "::error title=$stage::установщик не завершился за 10 минут"; Stop-Process -Id $p.Id -Force; exit 1 }
+            Write-Output "::notice title=$stage::установщик завершился за $([int]((Get-Date)-$t0).TotalSeconds) с, код $($p.ExitCode)"
+            if ($p.ExitCode -ne 0) { Write-Output "::error title=$stage::код установщика $($p.ExitCode)"; exit 1 }
+          }
           New-Item -ItemType Directory -Force ci-logs | Out-Null
           $setup = "dist\AvtoVes-Setup-$env:V.exe"
           $busy = Start-Process python -ArgumentList '-m','http.server','8780' -PassThru -WindowStyle Hidden
@@ -52,7 +61,8 @@ jobs:
           function Api($path) { Invoke-RestMethod "http://127.0.0.1:$(Port)$path" }
           function WaitApi($path) { for ($i=0; $i -lt 60; $i++) { try { return (Api $path) } catch { Start-Sleep 1 } }; return $null }
 
-          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=simulate','/LOG=ci-logs\install.log' -Wait
+          Setup @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=simulate','/LOG=ci-logs\install.log') 'Установка'
+
           $svc = Get-Service AvtoVes
           Write-Output "служба: $($svc.Status), запуск: $($svc.StartType), порт: $(Port)"
           if ($svc.Status -ne 'Running') { Get-Content ci-logs\install.log -Tail 40; exit 1 }
@@ -79,7 +89,7 @@ jobs:
           [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
           $bmp.Save((Join-Path (Resolve-Path ci-logs) "client.png"))
           if ($p.HasExited) { Write-Output "::error::АвтоВес.exe закрылась (код $($p.ExitCode))"; exit 1 }
-          Write-Output "окно: '$((Get-Process -Id $p.Id).MainWindowTitle)'"
+          Write-Output "::notice title=Программа::окно '$((Get-Process -Id $p.Id).MainWindowTitle)' открыто"
           Stop-Process -Id $p.Id -Force
 
           Write-Output "--- обновление поверх, порт в настройках занят"
@@ -88,9 +98,10 @@ jobs:
           $txt = Get-Content $cfg -Raw -Encoding UTF8
           # первый «  port:» — раздел server (порт веб-интерфейса); ставим занятый 8780
           [regex]::new('(?m)^(  port: )\d+').Replace($txt, '${1}8780', 1) | Set-Content $cfg -Encoding UTF8 -NoNewline
-          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=ci-logs\update.log' -Wait
+          Setup @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=ci-logs\update.log') 'Обновление'
+
           if ((Get-Service AvtoVes).Status -ne 'Running') { Get-Content ci-logs\update.log -Tail 40; exit 1 }
-          Write-Output "порт после обновления: $(Port)"
+          Write-Output "::notice title=Порт::после обновления $(Port) (был занят 8780)"
           if ((Port) -eq '8780') { Write-Output "::error::после обновления остался занятый порт"; exit 1 }
           $r2 = WaitApi "/api/trips"; $t2 = @($r2)
           if ($t2.Count -lt 1) { Write-Output "::error::после обновления пропала база"; exit 1 }
@@ -100,19 +111,22 @@ jobs:
           Copy-Item $cfg ci-logs\config.yaml
 
           Write-Output "--- удаление"
-          Start-Process "C:\Program Files\AvtoVes\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $u = Start-Process "C:\Program Files\AvtoVes\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru
+          if (-not $u.WaitForExit(300000)) { Write-Output "::error title=Удаление::не завершилось за 5 минут"; exit 1 }
           Start-Sleep 5
           if (Get-Service AvtoVes -ErrorAction SilentlyContinue) { Write-Output "::error::служба осталась после удаления"; exit 1 }
 
           Write-Output "--- только программа оператора"
-          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TYPE=client','/SERVER=192.168.1.10','/LOG=ci-logs\client.log' -Wait
+          Setup @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TYPE=client','/SERVER=192.168.1.10','/LOG=ci-logs\client.log') 'Только программа'
+
           if (Get-Service AvtoVes -ErrorAction SilentlyContinue) { Write-Output "::error::служба поставилась при «только программа»"; exit 1 }
           if (-not (Test-Path $exe)) { Write-Output "::error::нет АвтоВес.exe"; exit 1 }
           if (Test-Path "C:\Program Files\AvtoVes\python") { Write-Output "::error::поставился Python при «только программа»"; exit 1 }
           $url = (Get-ItemProperty HKLM:\Software\AvtoVes).Url
           Write-Output "адрес сервера: $url"
           if ($url -ne 'http://192.168.1.10:8780/') { Write-Output "::error::неверный адрес сервера $url"; exit 1 }
-          Start-Process "C:\Program Files\AvtoVes\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $u = Start-Process "C:\Program Files\AvtoVes\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru
+          if (-not $u.WaitForExit(300000)) { Write-Output "::error title=Удаление::не завершилось за 5 минут"; exit 1 }
           Stop-Process -Id $busy.Id -Force -ErrorAction SilentlyContinue
           Write-Output "::notice title=Установщик::занятый порт, установка, проезд, программа, обновление, удаление, «только программа» — в порядке"
 
