@@ -19,6 +19,8 @@ $ProgressPreference = "SilentlyContinue"
 
 $Root  = Split-Path -Parent $PSScriptRoot
 $Stage = Join-Path $Root "build\stage"
+$Srv   = Join-Path $Stage "server"     # сервер: служба, Python, распознавание
+$Cli   = Join-Path $Stage "client"     # программа оператора АвтоВес.exe
 $Cache = Join-Path $Root "build\cache"
 $Dist  = Join-Path $Root "dist"
 
@@ -28,6 +30,9 @@ $PySha256   = $env:PY_EMBED_SHA256      # если задан — сверяем
 $WinSWTag   = "v2.12.0"
 $WinSWUrl   = "https://github.com/winsw/winsw/releases/download/$WinSWTag/WinSW-x64.exe"
 $WinSWSha256 = $env:WINSW_SHA256
+$WV2Ver     = "1.0.2903.40"          # пакет Microsoft.Web.WebView2 (nuget.org)
+$WV2Url     = "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/$WV2Ver"
+$WV2BootUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"   # установщик среды WebView2 (Microsoft)
 
 function Step($t) { Write-Host ""; Write-Host "==> $t" -ForegroundColor Cyan }
 function Fail($t) { Write-Host "ОШИБКА: $t" -ForegroundColor Red; exit 1 }
@@ -64,13 +69,13 @@ function HostPy { & $HostExe @HostArgs @args; if ($LASTEXITCODE -ne 0) { Fail "p
 Step "Подготовка"
 New-Item -ItemType Directory -Force -Path $Cache, $Dist | Out-Null
 if (Test-Path $Stage) { Remove-Item $Stage -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+New-Item -ItemType Directory -Force -Path $Stage, $Srv, $Cli | Out-Null
 
 # ---------------------------------------------------------------- встроенный Python
 Step "Встроенный Python $PyVer"
 $pyZip = Join-Path $Cache "python-$PyVer-embed-amd64.zip"
 Get-File $PyZipUrl $pyZip $PySha256 | Out-Null
-$PyDir = Join-Path $Stage "python"
+$PyDir = Join-Path $Srv "python"
 Expand-Archive $pyZip -DestinationPath $PyDir -Force
 $pth = Get-ChildItem $PyDir -Filter "python3*._pth" | Select-Object -First 1
 if (-not $pth) { Fail "в архиве Python нет файла ._pth" }
@@ -93,21 +98,20 @@ Get-ChildItem $Site -Directory -Filter "bin" | Remove-Item -Recurse -Force -Erro
 
 # ---------------------------------------------------------------- код программы
 Step "Код АвтоВес $Version"
-Copy-Item (Join-Path $Root "main.py") $Stage
-Copy-Item (Join-Path $Root "README.md") $Stage
-Copy-Item (Join-Path $Root "app") (Join-Path $Stage "app") -Recurse
-Get-ChildItem (Join-Path $Stage "app") -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
-Set-Content -Path (Join-Path $Stage "app\__init__.py") -Encoding ASCII -Value "__version__ = `"$Version`""
-New-Item -ItemType Directory -Force -Path (Join-Path $Stage "1C") | Out-Null
-Copy-Item (Join-Path $Root "1c\*") (Join-Path $Stage "1C")
-foreach ($f in "config.template.yaml", "AvtoVesService.xml", "avtoves.ico") {
-  Copy-Item (Join-Path $Root "installer\$f") $Stage
+Copy-Item (Join-Path $Root "main.py") $Srv
+Copy-Item (Join-Path $Root "app") (Join-Path $Srv "app") -Recurse
+Get-ChildItem (Join-Path $Srv "app") -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
+Set-Content -Path (Join-Path $Srv "app\__init__.py") -Encoding ASCII -Value "__version__ = `"$Version`""
+New-Item -ItemType Directory -Force -Path (Join-Path $Srv "1C") | Out-Null
+Copy-Item (Join-Path $Root "1c\*") (Join-Path $Srv "1C")
+foreach ($f in "config.template.yaml", "AvtoVesService.xml") {
+  Copy-Item (Join-Path $Root "installer\$f") $Srv
 }
 $Py = Join-Path $PyDir "python.exe"
 
 # ---------------------------------------------------------------- модели распознавания
 Step "Модели распознавания номеров"
-$Models = Join-Path $Stage "models"
+$Models = Join-Path $Srv "models"
 New-Item -ItemType Directory -Force -Path $Models | Out-Null
 $oldUP = $env:USERPROFILE; $oldHome = $env:HOME
 $env:USERPROFILE = $Models; $env:HOME = $Models
@@ -137,10 +141,10 @@ if (-not $NoTest) {
   $T = Join-Path $Cache "smoke"
   if (Test-Path $T) { Remove-Item $T -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $T | Out-Null
-  & $Py -X utf8 (Join-Path $Stage "app\setup_config.py") --template (Join-Path $Stage "config.template.yaml") `
+  & $Py -X utf8 (Join-Path $Srv "app\setup_config.py") --template (Join-Path $Srv "config.template.yaml") `
       --out (Join-Path $T "config.yaml") --simulate --web-port 18080
   if ($LASTEXITCODE -ne 0) { Fail "setup_config" }
-  $p = Start-Process -FilePath $Py -ArgumentList "-X", "utf8", "`"$(Join-Path $Stage 'main.py')`"", "--config", "`"$(Join-Path $T 'config.yaml')`"" `
+  $p = Start-Process -FilePath $Py -ArgumentList "-X", "utf8", "`"$(Join-Path $Srv 'main.py')`"", "--config", "`"$(Join-Path $T 'config.yaml')`"" `
         -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $T "out.log") -RedirectStandardError (Join-Path $T "err.log")
   try {
     $ok = $false
@@ -176,7 +180,63 @@ try {
   if ($d -and $d -ne "sha256:$h") { Remove-Item $ws; Fail "WinSW: $h, а GitHub указывает $d" }
   if ($d) { Write-Host "   совпадает с отпечатком GitHub" }
 } catch { Write-Host "   (отпечаток GitHub проверить не удалось: $_)" }
-Copy-Item $ws (Join-Path $Stage "AvtoVesService.exe")
+Copy-Item $ws (Join-Path $Srv "AvtoVesService.exe")
+
+# ---------------------------------------------------------------- программа оператора
+Step "Программа АвтоВес.exe (WebView2 $WV2Ver)"
+$nupkg = Join-Path $Cache "Microsoft.Web.WebView2.$WV2Ver.nupkg"
+Get-File $WV2Url $nupkg $env:WEBVIEW2_NUPKG_SHA256 | Out-Null
+$wv = Join-Path $Cache "webview2-$WV2Ver"
+if (-not (Test-Path $wv)) {
+  Copy-Item $nupkg "$nupkg.zip" -Force
+  Expand-Archive "$nupkg.zip" -DestinationPath $wv -Force
+  Remove-Item "$nupkg.zip"
+}
+$wvLib = Get-ChildItem (Join-Path $wv "lib") -Directory | Where-Object { $_.Name -like "net4*" } | Sort-Object Name | Select-Object -First 1
+if (-not $wvLib) { Fail "в пакете WebView2 нет сборок для .NET Framework" }
+foreach ($f in "Microsoft.Web.WebView2.Core.dll", "Microsoft.Web.WebView2.WinForms.dll") {
+  Copy-Item (Join-Path $wvLib.FullName $f) $Cli
+}
+Copy-Item (Join-Path $wv "runtimes\win-x64\native\WebView2Loader.dll") $Cli
+foreach ($f in @((Join-Path $Cli "Microsoft.Web.WebView2.Core.dll"), (Join-Path $Cli "WebView2Loader.dll"))) {
+  $sig = Get-AuthenticodeSignature $f
+  if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "Microsoft") { Fail "${f}: подпись Microsoft не подтверждена ($($sig.Status))" }
+}
+Write-Host "   библиотеки WebView2 подписаны Microsoft"
+
+# компилятор C#: Roslyn из Visual Studio (если есть) или штатный csc .NET Framework
+$csc = $null
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path $vswhere) {
+  $vs = & $vswhere -latest -products * -property installationPath 2>$null
+  if ($vs) { $c = Join-Path $vs "MSBuild\Current\Bin\Roslyn\csc.exe"; if (Test-Path $c) { $csc = $c } }
+}
+if (-not $csc) { $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe" }
+if (-not (Test-Path $csc)) { Fail "не найден компилятор C# (csc.exe)" }
+Write-Host "   $csc"
+$fw = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319"
+$verParts = ($Version.Split(".") + @("0","0","0","0"))[0..3] -join "."
+$asmInfo = Join-Path $Cache "AssemblyVersion.cs"
+Set-Content -Path $asmInfo -Encoding UTF8 -Value "[assembly: System.Reflection.AssemblyVersion(`"$verParts`")]`n[assembly: System.Reflection.AssemblyFileVersion(`"$verParts`")]`n[assembly: System.Reflection.AssemblyInformationalVersion(`"$Version`")]"
+& $csc /nologo /target:winexe /platform:x64 /optimize+ /codepage:65001 `
+  "/out:$Cli\AvtoVes.exe" `
+  "/win32icon:$Root\installer\avtoves.ico" "/win32manifest:$Root\client\AvtoVes.manifest" `
+  "/r:$fw\System.dll" "/r:$fw\System.Core.dll" "/r:$fw\System.Drawing.dll" "/r:$fw\System.Windows.Forms.dll" `
+  "/r:$Cli\Microsoft.Web.WebView2.Core.dll" "/r:$Cli\Microsoft.Web.WebView2.WinForms.dll" `
+  (Join-Path $Root "client\AvtoVes.cs") $asmInfo
+if ($LASTEXITCODE -ne 0) { Fail "программа АвтоВес.exe не скомпилировалась" }
+Copy-Item (Join-Path $Root "client\AvtoVes.exe.config") $Cli
+Copy-Item (Join-Path $Root "installer\avtoves.ico") $Cli
+Copy-Item (Join-Path $Root "README.md") $Cli
+Write-Host "   $([math]::Round((Get-Item "$Cli\AvtoVes.exe").Length/1KB)) КБ" -ForegroundColor Green
+
+# установщик среды WebView2 — ставится, только если её нет на компьютере (Windows Server)
+$boot = Join-Path $Cache "MicrosoftEdgeWebview2Setup.exe"
+Get-File $WV2BootUrl $boot $null | Out-Null
+$sig = Get-AuthenticodeSignature $boot
+if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "Microsoft") { Remove-Item $boot; Fail "MicrosoftEdgeWebview2Setup.exe: подпись Microsoft не подтверждена" }
+New-Item -ItemType Directory -Force -Path (Join-Path $Stage "redist") | Out-Null
+Copy-Item $boot (Join-Path $Stage "redist")
 
 # ---------------------------------------------------------------- Inno Setup
 Step "Установщик (Inno Setup)"

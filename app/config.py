@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULTS = {
     "simulate": False,
-    "server": {"host": "0.0.0.0", "port": 8080, "api_token": ""},
+    "server": {"host": "0.0.0.0", "port": 8780, "api_token": ""},
     "data_dir": "data",
     "scale": {
         "connection": "tcp://127.0.0.1:4001", "parser": "cas", "data_len": 8,

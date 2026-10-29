@@ -36,43 +36,85 @@ jobs:
           if ($env:V -notmatch '^\d+\.\d+\.\d+$') { Write-Output "::error::Версия должна быть вида 1.2.3"; exit 1 }
           .\build\build.ps1 -Version $env:V
 
-      # Как на весовой: тихая установка → служба работает → проезд машины пишется →
-      # обновление поверх сохраняет базу → удаление убирает службу.
+      # Как на весовой: порт 8780 уже занят другой программой («детектор людей») →
+      # тихая установка → служба на свободном порту → проезд машины пишется → программа АвтоВес.exe открывается →
+      # обновление поверх (порт в настройках занят) — АвтоВес сам переезжает, база цела → удаление →
+      # установка «только программа оператора».
       - name: Проверка установки
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force ci-logs | Out-Null
           $setup = "dist\AvtoVes-Setup-$env:V.exe"
-          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=simulate','/PORT=8080','/LOG=install.log' -Wait
+          $busy = Start-Process python -ArgumentList '-m','http.server','8780' -PassThru -WindowStyle Hidden
+          Start-Sleep 3
+          function Port { (Get-ItemProperty HKLM:\Software\AvtoVes).Port }
+          function Api($path) { Invoke-RestMethod "http://127.0.0.1:$(Port)$path" }
+          function WaitApi($path) { for ($i=0; $i -lt 60; $i++) { try { return (Api $path) } catch { Start-Sleep 1 } }; return $null }
+
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=simulate','/LOG=ci-logs\install.log' -Wait
           $svc = Get-Service AvtoVes
-          Write-Output "служба: $($svc.Status), запуск: $($svc.StartType)"
-          if ($svc.Status -ne 'Running') { Get-Content install.log -Tail 40; exit 1 }
-          $s = $null
-          for ($i=0; $i -lt 60; $i++) { try { $s = Invoke-RestMethod http://127.0.0.1:8080/api/state; break } catch { Start-Sleep 1 } }
+          Write-Output "служба: $($svc.Status), запуск: $($svc.StartType), порт: $(Port)"
+          if ($svc.Status -ne 'Running') { Get-Content ci-logs\install.log -Tail 40; exit 1 }
+          if ((Port) -eq '8780') { Write-Output "::error::АвтоВес встал на занятый порт 8780"; exit 1 }
+          $s = WaitApi "/api/state"
           if (-not $s) { Get-ChildItem C:\ProgramData\AvtoVes\logs | Get-Content -Tail 40; exit 1 }
           Write-Output "АвтоВес $($s.version), весы на связи: $($s.scale.connected)"
           if ($s.version -ne $env:V) { Write-Output "::error::версия $($s.version) вместо $env:V"; exit 1 }
           $body = [Text.Encoding]::UTF8.GetBytes('{"plate":"А777МР50","weight":38460,"side":"a"}')
-          Invoke-RestMethod -Method Post http://127.0.0.1:8080/api/sim/drive -ContentType 'application/json; charset=utf-8' -Body $body | Out-Null
+          Invoke-RestMethod -Method Post "http://127.0.0.1:$(Port)/api/sim/drive" -ContentType 'application/json; charset=utf-8' -Body $body | Out-Null
           $t = @()
-          for ($i=0; $i -lt 60; $i++) { Start-Sleep 1; $r = Invoke-RestMethod http://127.0.0.1:8080/api/trips; $t = @($r); if ($t.Count) { break } }
+          for ($i=0; $i -lt 60; $i++) { Start-Sleep 1; $r = Api "/api/trips"; $t = @($r); if ($t.Count) { break } }
           if (-not $t.Count) { Write-Output "::error::взвешивание не записалось"; exit 1 }
           Write-Output "рейс: $($t[0].plate) $($t[0].w1) кг"
-          if (-not (Test-Path "C:\ProgramData\AvtoVes\config.yaml")) { exit 1 }
 
-          Write-Output "--- обновление поверх"
-          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=update.log' -Wait
-          if ((Get-Service AvtoVes).Status -ne 'Running') { Get-Content update.log -Tail 40; exit 1 }
-          $t2 = $null
-          for ($i=0; $i -lt 60; $i++) { try { $r2 = Invoke-RestMethod http://127.0.0.1:8080/api/trips; $t2 = @($r2); break } catch { Start-Sleep 1 } }
+          Write-Output "--- программа АвтоВес.exe"
+          $exe = "C:\Program Files\AvtoVes\AvtoVes.exe"
+          if (-not (Test-Path $exe)) { Write-Output "::error::нет АвтоВес.exe"; exit 1 }
+          $p = Start-Process $exe -PassThru
+          Start-Sleep 25
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save((Join-Path (Resolve-Path ci-logs) "client.png"))
+          if ($p.HasExited) { Write-Output "::error::АвтоВес.exe закрылась (код $($p.ExitCode))"; exit 1 }
+          Write-Output "окно: '$((Get-Process -Id $p.Id).MainWindowTitle)'"
+          Stop-Process -Id $p.Id -Force
+
+          Write-Output "--- обновление поверх, порт в настройках занят"
+          Stop-Service AvtoVes
+          $cfg = "C:\ProgramData\AvtoVes\config.yaml"
+          $txt = Get-Content $cfg -Raw -Encoding UTF8
+          # первый «  port:» — раздел server (порт веб-интерфейса); ставим занятый 8780
+          [regex]::new('(?m)^(  port: )\d+').Replace($txt, '${1}8780', 1) | Set-Content $cfg -Encoding UTF8 -NoNewline
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=ci-logs\update.log' -Wait
+          if ((Get-Service AvtoVes).Status -ne 'Running') { Get-Content ci-logs\update.log -Tail 40; exit 1 }
+          Write-Output "порт после обновления: $(Port)"
+          if ((Port) -eq '8780') { Write-Output "::error::после обновления остался занятый порт"; exit 1 }
+          $r2 = WaitApi "/api/trips"; $t2 = @($r2)
           if ($t2.Count -lt 1) { Write-Output "::error::после обновления пропала база"; exit 1 }
           Write-Output "после обновления рейсов: $($t2.Count)"
+          $io = (Get-Content $cfg -Encoding UTF8 | Select-String '^\s+port:\s*(\d+)' -AllMatches | ForEach-Object { $_.Matches[0].Groups[1].Value }) -join ','
+          Write-Output "порты в настройках: $io"
+          Copy-Item $cfg ci-logs\config.yaml
 
           Write-Output "--- удаление"
           Start-Process "C:\Program Files\AvtoVes\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
           Start-Sleep 5
           if (Get-Service AvtoVes -ErrorAction SilentlyContinue) { Write-Output "::error::служба осталась после удаления"; exit 1 }
-          Write-Output "::notice title=Установщик::установка, проезд, обновление и удаление — в порядке"
+
+          Write-Output "--- только программа оператора"
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TYPE=client','/SERVER=192.168.1.10','/LOG=ci-logs\client.log' -Wait
+          if (Get-Service AvtoVes -ErrorAction SilentlyContinue) { Write-Output "::error::служба поставилась при «только программа»"; exit 1 }
+          if (-not (Test-Path $exe)) { Write-Output "::error::нет АвтоВес.exe"; exit 1 }
+          if (Test-Path "C:\Program Files\AvtoVes\python") { Write-Output "::error::поставился Python при «только программа»"; exit 1 }
+          $url = (Get-ItemProperty HKLM:\Software\AvtoVes).Url
+          Write-Output "адрес сервера: $url"
+          if ($url -ne 'http://192.168.1.10:8780/') { Write-Output "::error::неверный адрес сервера $url"; exit 1 }
+          Start-Process "C:\Program Files\AvtoVes\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          Stop-Process -Id $busy.Id -Force -ErrorAction SilentlyContinue
+          Write-Output "::notice title=Установщик::занятый порт, установка, проезд, программа, обновление, удаление, «только программа» — в порядке"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -86,7 +128,6 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force ci-logs | Out-Null
-          Copy-Item install.log, update.log ci-logs -ErrorAction SilentlyContinue
           Copy-Item C:\ProgramData\AvtoVes\logs\* ci-logs -ErrorAction SilentlyContinue
           Copy-Item C:\ProgramData\AvtoVes\data\avtoves.log ci-logs -ErrorAction SilentlyContinue
       - uses: actions/upload-artifact@v4

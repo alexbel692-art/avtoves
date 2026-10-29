@@ -9,7 +9,7 @@ simulate: false
 
 server:
   host: 0.0.0.0
-  port: 8080
+  port: 8780
   # Токен для обмена с 1С (заголовок X-Api-Token). Поменяйте!
   api_token: "change-me-1c-token"
 

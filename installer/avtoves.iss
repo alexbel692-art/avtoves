@@ -1,4 +1,6 @@
-﻿; Установщик АвтоВес (Inno Setup 6). Собирается build\build.ps1 — сначала он готовит build\stage.
+﻿﻿; Установщик АвтоВес (Inno Setup 6). Собирается build\build.ps1 — сначала он готовит build\stage.
+;   server — служба АвтоВес (Python, распознавание номеров, весы, светофоры)
+;   client — программа оператора АвтоВес.exe (окно WebView2)
 #ifndef AppVer
   #define AppVer GetEnv("APP_VERSION")
 #endif
@@ -7,6 +9,7 @@
 #endif
 #define AppGuid "{{0C5D9E77-A226-4792-8944-7003B7B69D8E}"
 #define Svc "AvtoVes"
+#define DefPort "8780"
 
 [Setup]
 AppId={#AppGuid}
@@ -21,7 +24,8 @@ DefaultGroupName=АвтоВес
 DisableProgramGroupPage=yes
 DisableDirPage=auto
 UsePreviousAppDir=yes
-; служба для всех пользователей — нужны права администратора
+UsePreviousSetupType=yes
+; служба и программа для всех пользователей — нужны права администратора
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -30,7 +34,7 @@ OutputDir=..\dist
 OutputBaseFilename=AvtoVes-Setup-{#AppVer}
 SetupIconFile=avtoves.ico
 WizardSmallImageFile=wizard-small.bmp
-UninstallDisplayIcon={app}\avtoves.ico
+UninstallDisplayIcon={app}\AvtoVes.exe
 UninstallDisplayName=АвтоВес
 Compression=lzma2/max
 SolidCompression=yes
@@ -46,62 +50,76 @@ Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 ru.TaskSimulate=Режим проверки без оборудования (имитатор весов, светофоров и камер)
 ru.GroupOptions=Дополнительно:
 
+[Types]
+Name: "full"; Description: "Сервер весовой: весы, камеры, светофоры + программа оператора"
+Name: "client"; Description: "Только программа оператора (подключается к серверу АвтоВес по сети)"
+
+[Components]
+Name: "server"; Description: "Сервер АвтоВес (служба Windows, распознавание номеров)"; Types: full
+Name: "client"; Description: "Программа оператора АвтоВес"; Types: full client; Flags: fixed
+
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "simulate"; Description: "{cm:TaskSimulate}"; GroupDescription: "{cm:GroupOptions}"; Flags: unchecked; Check: IsFirstInstall
+Name: "simulate"; Description: "{cm:TaskSimulate}"; GroupDescription: "{cm:GroupOptions}"; Flags: unchecked; Components: server; Check: IsFirstInstall
 
 [Dirs]
 ; база, снимки и настройки живут здесь и переживают обновление и переустановку
-Name: "{commonappdata}\AvtoVes"; Permissions: users-modify; Flags: uninsneveruninstall
-Name: "{commonappdata}\AvtoVes\data"; Flags: uninsneveruninstall
-Name: "{commonappdata}\AvtoVes\logs"; Flags: uninsneveruninstall
+Name: "{commonappdata}\AvtoVes"; Permissions: users-modify; Flags: uninsneveruninstall; Components: server
+Name: "{commonappdata}\AvtoVes\data"; Flags: uninsneveruninstall; Components: server
+Name: "{commonappdata}\AvtoVes\logs"; Flags: uninsneveruninstall; Components: server
 
 [InstallDelete]
 ; старый код приложения убираем целиком — чтобы не оставались удалённые модули
 Type: filesandordirs; Name: "{app}\app"
 Type: filesandordirs; Name: "{app}\python"
+; ярлык на браузер из версии 1.0
+Type: files; Name: "{app}\avtoves.url"
 
 [Files]
-Source: "..\build\stage\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\build\stage\client\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: client
+Source: "..\build\stage\server\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: server
+Source: "..\build\stage\redist\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: dontcopy
 
 [Registry]
-Root: HKLM; Subkey: "Software\AvtoVes"; ValueType: string; ValueName: "Port"; ValueData: "{code:GetPort}"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\AvtoVes"; ValueType: string; ValueName: "Config"; ValueData: "{commonappdata}\AvtoVes\config.yaml"
-
-[INI]
-; ярлык на веб-интерфейс (порт берётся из установки)
-Filename: "{app}\avtoves.url"; Section: "InternetShortcut"; Key: "URL"; String: "http://localhost:{code:GetPort}/"
-Filename: "{app}\avtoves.url"; Section: "InternetShortcut"; Key: "IconFile"; String: "{app}\avtoves.ico"
-Filename: "{app}\avtoves.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"
+Root: HKLM; Subkey: "Software\AvtoVes"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\AvtoVes"; ValueType: string; ValueName: "Config"; ValueData: "{commonappdata}\AvtoVes\config.yaml"; Components: server
+; сервер на этом компьютере — программа берёт порт из настроек; только программа — адрес сервера
+Root: HKLM; Subkey: "Software\AvtoVes"; ValueType: none; ValueName: "Url"; Flags: deletevalue; Components: server
+Root: HKLM; Subkey: "Software\AvtoVes"; ValueType: string; ValueName: "Url"; ValueData: "{code:GetClientUrl}"; Check: NeedClientUrl
 
 [UninstallDelete]
-Type: files; Name: "{app}\avtoves.url"
 Type: filesandordirs; Name: "{app}\app"
 Type: filesandordirs; Name: "{app}\python"
 
 [Icons]
-Name: "{group}\АвтоВес"; Filename: "{app}\avtoves.url"; IconFilename: "{app}\avtoves.ico"; Comment: "Рабочее место оператора весовой"
-Name: "{group}\Настройки АвтоВес"; Filename: "{win}\notepad.exe"; Parameters: """{commonappdata}\AvtoVes\config.yaml"""; IconFilename: "{app}\avtoves.ico"
-Name: "{group}\Перезапустить АвтоВес"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -Command ""Start-Process -FilePath '{app}\AvtoVesService.exe' -ArgumentList 'restart' -Verb RunAs -WindowStyle Hidden"""; IconFilename: "{app}\avtoves.ico"; Comment: "Применить изменённые настройки"
-Name: "{group}\Данные и снимки"; Filename: "{commonappdata}\AvtoVes\data"
-Name: "{group}\Журналы"; Filename: "{commonappdata}\AvtoVes\logs"
-Name: "{group}\Обмен с 1С"; Filename: "{app}\1C"
+Name: "{group}\АвтоВес"; Filename: "{app}\AvtoVes.exe"; Comment: "Рабочее место оператора весовой"; AppUserModelID: "AvtoVes.Client"
+Name: "{group}\Настройки АвтоВес"; Filename: "{win}\notepad.exe"; Parameters: """{commonappdata}\AvtoVes\config.yaml"""; IconFilename: "{app}\avtoves.ico"; Components: server
+Name: "{group}\Перезапустить АвтоВес"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -Command ""Start-Process -FilePath '{app}\AvtoVesService.exe' -ArgumentList 'restart' -Verb RunAs -WindowStyle Hidden"""; IconFilename: "{app}\avtoves.ico"; Comment: "Применить изменённые настройки"; Components: server
+Name: "{group}\Данные и снимки"; Filename: "{commonappdata}\AvtoVes\data"; Components: server
+Name: "{group}\Журналы"; Filename: "{commonappdata}\AvtoVes\logs"; Components: server
+Name: "{group}\Обмен с 1С"; Filename: "{app}\1C"; Components: server
 Name: "{group}\Инструкция"; Filename: "{win}\notepad.exe"; Parameters: """{app}\README.md"""
 Name: "{group}\{cm:UninstallProgram,АвтоВес}"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\АвтоВес"; Filename: "{app}\avtoves.url"; IconFilename: "{app}\avtoves.ico"; Tasks: desktopicon
+Name: "{commondesktop}\АвтоВес"; Filename: "{app}\AvtoVes.exe"; Tasks: desktopicon; AppUserModelID: "AvtoVes.Client"
 
 [Run]
-Filename: "http://localhost:{code:GetPort}/"; Description: "Открыть АвтоВес"; Flags: shellexec postinstall nowait skipifsilent
+Filename: "{app}\AvtoVes.exe"; Description: "Запустить АвтоВес"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [Code]
 var
-  HwPage, CamPage: TInputQueryWizardPage;
+  HwPage, CamPage, ClientPage: TInputQueryWizardPage;
   ModePage: TInputOptionWizardPage;
-  ConfigExisted: Boolean;
+  ConfigExisted, ClientUrlExisted: Boolean;
+  FinalPort: String;
 
 function ConfigPath(): String;
 begin
   Result := ExpandConstant('{commonappdata}\AvtoVes\config.yaml');
+end;
+
+function IsServer(): Boolean;
+begin
+  Result := WizardIsComponentSelected('server');
 end;
 
 function IsFirstInstall(): Boolean;
@@ -109,25 +127,36 @@ begin
   Result := not ConfigExisted;
 end;
 
-function GetPort(Param: String): String;
+function NeedClientUrl(): Boolean;
 begin
-  Result := '';
-  if ConfigExisted then
-    RegQueryStringValue(HKLM64, 'Software\AvtoVes', 'Port', Result);
-  if (Result = '') and (HwPage <> nil) then
-    Result := Trim(HwPage.Values[3]);
-  if Result = '' then
-    Result := '8080';
+  Result := (not IsServer()) and (not ClientUrlExisted);
+end;
+
+function GetClientUrl(Param: String): String;
+var
+  S: String;
+begin
+  S := Trim(ClientPage.Values[0]);
+  if (Pos('http://', LowerCase(S)) <> 1) and (Pos('https://', LowerCase(S)) <> 1) then
+  begin
+    // без порта — порт по умолчанию
+    if Pos(':', S) = 0 then S := S + ':{#DefPort}';
+    S := 'http://' + S;
+  end;
+  if Copy(S, Length(S), 1) <> '/' then S := S + '/';
+  Result := S;
 end;
 
 // ------------------------------------------------------------ защита от отката (как в Ласточке)
 function InitializeSetup(): Boolean;
 var
-  Installed: String;
+  Installed, Url: String;
   Cur, Old: Int64;
 begin
   Result := True;
   ConfigExisted := FileExists(ConfigPath());
+  ClientUrlExisted := RegQueryStringValue(HKLM64, 'Software\AvtoVes', 'Url', Url) and (Url <> '');
+  FinalPort := '';
   if Pos('/ALLOWDOWNGRADE', UpperCase(GetCmdTail)) > 0 then Exit;
   if not RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{0C5D9E77-A226-4792-8944-7003B7B69D8E}_is1', 'DisplayVersion', Installed) then Exit;
   if not StrToVersion('{#AppVer}', Cur) then Exit;
@@ -149,11 +178,11 @@ begin
   HwPage.Add('IP-адрес Moxa NPort (весовой индикатор CAS CI-200A):', False);
   HwPage.Add('TCP-порт NPort (режим TCP Server):', False);
   HwPage.Add('IP-адрес Moxa ioLogik для светофоров (пусто — без светофоров):', False);
-  HwPage.Add('Порт веб-интерфейса АвтоВес:', False);
+  HwPage.Add('Порт АвтоВес в сети (должен быть свободен):', False);
   HwPage.Values[0] := ExpandConstant('{param:NPORT|192.168.1.50}');
   HwPage.Values[1] := ExpandConstant('{param:NPORTPORT|4001}');
   HwPage.Values[2] := ExpandConstant('{param:IOLOGIK|192.168.1.60}');
-  HwPage.Values[3] := ExpandConstant('{param:PORT|8080}');
+  HwPage.Values[3] := ExpandConstant('{param:PORT|{#DefPort}}');
 
   CamPage := CreateInputQueryPage(HwPage.ID,
     'Камеры', 'Камеры распознавания номеров',
@@ -173,12 +202,23 @@ begin
     ModePage.SelectedValueIndex := 1
   else
     ModePage.SelectedValueIndex := 0;
+
+  ClientPage := CreateInputQueryPage(ModePage.ID,
+    'Сервер АвтоВес', 'К какому серверу подключаться?',
+    'Укажите IP-адрес или имя компьютера весовой, где установлен сервер АвтоВес. ' +
+    'Порт можно указать через двоеточие (по умолчанию {#DefPort}).');
+  ClientPage.Add('Адрес сервера (например 192.168.1.10 или 192.168.1.10:{#DefPort}):', False);
+  ClientPage.Values[0] := ExpandConstant('{param:SERVER|}');
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  // при обновлении настройки уже есть — вопросы не задаём
-  Result := ConfigExisted and ((PageID = HwPage.ID) or (PageID = CamPage.ID) or (PageID = ModePage.ID));
+  Result := False;
+  // вопросы об оборудовании — только при первой установке сервера
+  if (PageID = HwPage.ID) or (PageID = CamPage.ID) or (PageID = ModePage.ID) then
+    Result := ConfigExisted or not IsServer();
+  if PageID = ClientPage.ID then
+    Result := IsServer() or ClientUrlExisted;
 end;
 
 function ValidPort(S: String): Boolean;
@@ -187,6 +227,21 @@ var
 begin
   N := StrToIntDef(Trim(S), -1);
   Result := (N >= 1) and (N <= 65535);
+end;
+
+function PS(): String;
+begin
+  Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+end;
+
+function PortBusy(Port: String): Boolean;
+var
+  RC: Integer;
+begin
+  Result := False;
+  if Exec(PS(), '-NoProfile -Command "if (Get-NetTCPConnection -State Listen -LocalPort ' + Trim(Port) +
+    ' -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }"', '', SW_HIDE, ewWaitUntilTerminated, RC) then
+    Result := RC = 1;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -203,6 +258,21 @@ begin
     begin
       MsgBox('Порт — число от 1 до 65535.', mbError, MB_OK);
       Result := False;
+    end
+    else if PortBusy(HwPage.Values[3]) then
+    begin
+      MsgBox('Порт ' + Trim(HwPage.Values[3]) + ' уже занят другой программой на этом компьютере ' +
+        '(например, детектором людей или другим веб-сервисом).' + #13#10 + 'Укажите другой порт, например {#DefPort} или 8781.',
+        mbError, MB_OK);
+      Result := False;
+    end;
+  end;
+  if CurPageID = ClientPage.ID then
+  begin
+    if Trim(ClientPage.Values[0]) = '' then
+    begin
+      MsgBox('Укажите адрес сервера АвтоВес.', mbError, MB_OK);
+      Result := False;
     end;
   end;
 end;
@@ -212,8 +282,15 @@ function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoType
 var
   S: String;
 begin
-  S := MemoDirInfo + NewLine + NewLine;
-  if ConfigExisted then
+  S := MemoDirInfo + NewLine + NewLine + MemoTypeInfo + NewLine + NewLine;
+  if not IsServer() then
+  begin
+    if ClientUrlExisted then
+      S := S + 'Обновление программы оператора, адрес сервера сохранится.' + NewLine
+    else
+      S := S + 'Сервер АвтоВес: ' + GetClientUrl('') + NewLine;
+  end
+  else if ConfigExisted then
     S := S + 'Обновление: настройки, база взвешиваний и снимки сохранятся.' + NewLine +
              Space + ConfigPath() + NewLine
   else
@@ -230,11 +307,12 @@ begin
       S := S + Space + 'Режим: тупиковые весы' + NewLine
     else
       S := S + Space + 'Режим: проездные весы' + NewLine;
-    S := S + Space + 'Веб-интерфейс: http://<этот компьютер>:' + HwPage.Values[3] + NewLine;
+    S := S + Space + 'Порт АвтоВес: ' + HwPage.Values[3] + NewLine;
   end;
   if MemoTasksInfo <> '' then
     S := S + NewLine + MemoTasksInfo + NewLine;
-  S := S + NewLine + 'АвтоВес будет установлен как служба Windows и будет запускаться вместе с компьютером.';
+  if IsServer() then
+    S := S + NewLine + 'Сервер АвтоВес будет работать как служба Windows и запускаться вместе с компьютером.';
   Result := S;
 end;
 
@@ -248,11 +326,6 @@ begin
     RC := -1;
   Log(Exe + ' ' + Params + ' -> ' + IntToStr(RC));
   Result := RC;
-end;
-
-function PS(): String;
-begin
-  Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
 end;
 
 procedure StopAndRemoveService();
@@ -277,22 +350,47 @@ begin
   Sleep(1000);
 end;
 
+// Программа оператора может быть открыта у нескольких пользователей (RDP) — закрываем все копии
+procedure CloseClients();
+begin
+  RunCmd(ExpandConstant('{sys}\taskkill.exe'), '/F /IM AvtoVes.exe', True);
+end;
+
 procedure WaitForWeb(Port: String);
 begin
   RunCmd(PS(), '-NoProfile -Command "for($i=0;$i -lt 60;$i++){try{$c=New-Object Net.Sockets.TcpClient(''127.0.0.1'',' + Port +
     ');$c.Close();exit 0}catch{Start-Sleep -Milliseconds 500}};exit 1"', True);
 end;
 
+function PyRun(const Params: String): Integer;
+begin
+  Result := RunCmd(ExpandConstant('{app}\python\python.exe'),
+    '-X utf8 "' + ExpandConstant('{app}\app\setup_config.py') + '" ' + Params, True);
+end;
+
+function ReportFile(): String;
+begin
+  Result := ExpandConstant('{tmp}\avtoves-port.txt');
+end;
+
+function ReadReportedPort(): String;
+var
+  S: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(ReportFile(), S) then
+    Result := Trim(String(S));
+end;
+
 procedure CreateConfig();
 var
-  Params, Mode, Py: String;
+  Params, Mode: String;
   RC: Integer;
 begin
   if ModePage.SelectedValueIndex = 1 then Mode := 'reverse' else Mode := 'through';
-  Py := ExpandConstant('{app}\python\python.exe');
-  Params := '-X utf8 "' + ExpandConstant('{app}\app\setup_config.py') + '"' +
-    ' --template "' + ExpandConstant('{app}\config.template.yaml') + '"' +
+  Params := '--template "' + ExpandConstant('{app}\config.template.yaml') + '"' +
     ' --out "' + ConfigPath() + '"' +
+    ' --report "' + ReportFile() + '"' +
     ' --nport "' + Trim(HwPage.Values[0]) + '"' +
     ' --nport-port "' + Trim(HwPage.Values[1]) + '"' +
     ' --iologik "' + Trim(HwPage.Values[2]) + '"' +
@@ -302,10 +400,40 @@ begin
     ' --mode ' + Mode;
   if WizardIsTaskSelected('simulate') then
     Params := Params + ' --simulate';
-  RC := RunCmd(Py, Params, True);
+  RC := PyRun(Params);
   if (RC <> 0) and not WizardSilent then
     MsgBox('Не удалось создать файл настроек (код ' + IntToStr(RC) + ').' + #13#10 +
       'Проверьте введённые адреса и отредактируйте ' + ConfigPath() + ' вручную.', mbError, MB_OK);
+end;
+
+// Обновление: если порт АвтоВес занят другой программой (например, детектором людей) — переводим на свободный
+procedure FixPort();
+var
+  RC: Integer;
+begin
+  RC := PyRun('--fix-port --out "' + ConfigPath() + '" --report "' + ReportFile() + '"');
+  if (RC = 10) and not WizardSilent then
+    MsgBox('Прежний порт АвтоВес занят другой программой на этом компьютере.' + #13#10 +
+      'АвтоВес переведён на порт ' + ReadReportedPort() + '. Программа АвтоВес на этом компьютере подключится сама; ' +
+      'на других компьютерах и в 1С укажите новый порт.', mbInformation, MB_OK);
+end;
+
+function WebView2Installed(): Boolean;
+var
+  V: String;
+begin
+  Result :=
+    (RegQueryStringValue(HKLM32, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', V) and (V <> '') and (V <> '0.0.0.0')) or
+    (RegQueryStringValue(HKCU, 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', V) and (V <> '') and (V <> '0.0.0.0'));
+end;
+
+procedure EnsureWebView2();
+begin
+  if WebView2Installed() then Exit;
+  WizardForm.StatusLabel.Caption := 'Установка компонента Microsoft WebView2 (нужен интернет)...';
+  ExtractTemporaryFile('MicrosoftEdgeWebview2Setup.exe');
+  if RunCmd(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), '/silent /install', True) <> 0 then
+    Log('WebView2 не установился — программа откроется через Microsoft Edge или браузер');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -314,18 +442,30 @@ var
 begin
   if CurStep = ssInstall then
   begin
-    WizardForm.StatusLabel.Caption := 'Остановка службы АвтоВес...';
-    StopAndRemoveService();
+    WizardForm.StatusLabel.Caption := 'Закрытие АвтоВес...';
+    CloseClients();
+    if IsServer() or FileExists(ExpandConstant('{app}\AvtoVesService.exe')) then
+      StopAndRemoveService();
   end;
   if CurStep = ssPostInstall then
   begin
+    EnsureWebView2();
+    if not IsServer() then Exit;
     Wrapper := ExpandConstant('{app}\AvtoVesService.exe');
     Py := ExpandConstant('{app}\python\python.exe');
-    if not ConfigExisted then
+    if ConfigExisted then
+    begin
+      WizardForm.StatusLabel.Caption := 'Проверка порта АвтоВес...';
+      FixPort();
+    end
+    else
     begin
       WizardForm.StatusLabel.Caption := 'Создание настроек...';
       CreateConfig();
     end;
+    FinalPort := ReadReportedPort();
+    if FinalPort <> '' then
+      RegWriteStringValue(HKLM64, 'Software\AvtoVes', 'Port', FinalPort);
     WizardForm.StatusLabel.Caption := 'Разрешение в брандмауэре Windows...';
     RunCmd(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="АвтоВес"', True);
     RunCmd(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall add rule name="АвтоВес" dir=in action=allow ' +
@@ -339,9 +479,18 @@ begin
         MsgBox('Служба АвтоВес не запустилась. Журнал: ' +
           ExpandConstant('{commonappdata}\AvtoVes\logs'), mbError, MB_OK);
     end
-    else
-      WaitForWeb(GetPort(''));
+    else if FinalPort <> '' then
+      WaitForWeb(FinalPort);
   end;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and IsServer() and (FinalPort <> '') then
+    WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
+      'АвтоВес работает на порту ' + FinalPort + '.' + #13#10 +
+      'На других компьютерах установите «Только программа оператора» и укажите адрес ' +
+      'этого компьютера: <IP>:' + FinalPort;
 end;
 
 // ------------------------------------------------------------ удаление
@@ -351,8 +500,12 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
-    StopAndRemoveService();
-    RunCmd(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="АвтоВес"', True);
+    RunCmd(ExpandConstant('{sys}\taskkill.exe'), '/F /IM AvtoVes.exe', True);
+    if FileExists(ExpandConstant('{app}\AvtoVesService.exe')) then
+    begin
+      StopAndRemoveService();
+      RunCmd(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="АвтоВес"', True);
+    end;
   end;
   if CurUninstallStep = usPostUninstall then
   begin
