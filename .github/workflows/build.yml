@@ -22,6 +22,8 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write   # только для выкладки диагностики при сбое (релиз ci-debug)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +48,13 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           # ждём только сам установщик (Start-Process -Wait ждёт и все порождённые процессы)
+          function Shot($name) {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save((Join-Path (Resolve-Path ci-logs) "$name.png"))
+          }
           function LogTail($file, $stage) {
             if (Test-Path $file) {
               Get-Content $file -Encoding UTF8 -Tail 25 | ForEach-Object { Write-Output "::warning title=$stage (журнал)::$_" }
@@ -59,6 +68,7 @@ jobs:
               Write-Output "::error title=$stage::установщик не завершился за 10 минут"
               Get-Process | Where-Object { $_.StartTime -gt $t0 } | ForEach-Object { Write-Output "::warning title=Процессы::$($_.Name) $($_.Path)" }
               LogTail $log $stage
+              Shot "hang"
               Stop-Process -Id $p.Id -Force; exit 1
             }
             Write-Output "::notice title=$stage::установщик завершился за $([int]((Get-Date)-$t0).TotalSeconds) с, код $($p.ExitCode)"
@@ -156,6 +166,18 @@ jobs:
           New-Item -ItemType Directory -Force ci-logs | Out-Null
           Copy-Item C:\ProgramData\AvtoVes\logs\* ci-logs -ErrorAction SilentlyContinue
           Copy-Item C:\ProgramData\AvtoVes\data\avtoves.log ci-logs -ErrorAction SilentlyContinue
+      # артефакты GitHub не всегда можно скачать — при сбое кладём журналы ещё и в релиз ci-debug
+      - name: Диагностика при сбое
+        if: failure()
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path ci-logs\* -DestinationPath ci-debug.zip -Force
+          gh release view ci-debug -R $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -ne 0) { gh release create ci-debug -R $env:GITHUB_REPOSITORY --prerelease --title "Диагностика сборки" --notes "Журналы последней неудачной сборки (служебное)." }
+          gh release upload ci-debug ci-debug.zip -R $env:GITHUB_REPOSITORY --clobber
       - uses: actions/upload-artifact@v4
         if: always()
         continue-on-error: true

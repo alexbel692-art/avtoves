@@ -164,7 +164,7 @@ begin
   if ComparePackedVersion(Cur, Old) < 0 then
   begin
     if not WizardSilent then
-      MsgBox('Уже установлен более новый АвтоВес (' + Installed + '). Установка старой версии ({#AppVer}) отменена.', mbError, MB_OK);
+      SuppressibleMsgBox('Уже установлен более новый АвтоВес (' + Installed + '). Установка старой версии ({#AppVer}) отменена.', mbError, MB_OK, IDOK);
     Result := False;
   end;
 end;
@@ -247,23 +247,25 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
+  // тихая установка: проверки не нужны (занятый порт заменит setup_config), окна показывать нельзя
+  if WizardSilent then Exit;
   if CurPageID = HwPage.ID then
   begin
     if (Trim(HwPage.Values[0]) = '') and not WizardIsTaskSelected('simulate') then
     begin
-      MsgBox('Укажите IP-адрес Moxa NPort.', mbError, MB_OK);
+      SuppressibleMsgBox('Укажите IP-адрес Moxa NPort.', mbError, MB_OK, IDOK);
       Result := False;
     end
     else if not ValidPort(HwPage.Values[1]) or not ValidPort(HwPage.Values[3]) then
     begin
-      MsgBox('Порт — число от 1 до 65535.', mbError, MB_OK);
+      SuppressibleMsgBox('Порт — число от 1 до 65535.', mbError, MB_OK, IDOK);
       Result := False;
     end
     else if PortBusy(HwPage.Values[3]) then
     begin
-      MsgBox('Порт ' + Trim(HwPage.Values[3]) + ' уже занят другой программой на этом компьютере ' +
+      SuppressibleMsgBox('Порт ' + Trim(HwPage.Values[3]) + ' уже занят другой программой на этом компьютере ' +
         '(например, детектором людей или другим веб-сервисом).' + #13#10 + 'Укажите другой порт, например {#DefPort} или 8781.',
-        mbError, MB_OK);
+        mbError, MB_OK, IDOK);
       Result := False;
     end;
   end;
@@ -271,7 +273,7 @@ begin
   begin
     if Trim(ClientPage.Values[0]) = '' then
     begin
-      MsgBox('Укажите адрес сервера АвтоВес.', mbError, MB_OK);
+      SuppressibleMsgBox('Укажите адрес сервера АвтоВес.', mbError, MB_OK, IDOK);
       Result := False;
     end;
   end;
@@ -402,8 +404,8 @@ begin
     Params := Params + ' --simulate';
   RC := PyRun(Params);
   if (RC <> 0) and not WizardSilent then
-    MsgBox('Не удалось создать файл настроек (код ' + IntToStr(RC) + ').' + #13#10 +
-      'Проверьте введённые адреса и отредактируйте ' + ConfigPath() + ' вручную.', mbError, MB_OK);
+    SuppressibleMsgBox('Не удалось создать файл настроек (код ' + IntToStr(RC) + ').' + #13#10 +
+      'Проверьте введённые адреса и отредактируйте ' + ConfigPath() + ' вручную.', mbError, MB_OK, IDOK);
 end;
 
 // Обновление: если порт АвтоВес занят другой программой (например, детектором людей) — переводим на свободный
@@ -413,9 +415,9 @@ var
 begin
   RC := PyRun('--fix-port --out "' + ConfigPath() + '" --report "' + ReportFile() + '"');
   if (RC = 10) and not WizardSilent then
-    MsgBox('Прежний порт АвтоВес занят другой программой на этом компьютере.' + #13#10 +
+    SuppressibleMsgBox('Прежний порт АвтоВес занят другой программой на этом компьютере.' + #13#10 +
       'АвтоВес переведён на порт ' + ReadReportedPort() + '. Программа АвтоВес на этом компьютере подключится сама; ' +
-      'на других компьютерах и в 1С укажите новый порт.', mbInformation, MB_OK);
+      'на других компьютерах и в 1С укажите новый порт.', mbInformation, MB_OK, IDOK);
 end;
 
 function WebView2Installed(): Boolean;
@@ -499,8 +501,8 @@ begin
     if RunCmd(Wrapper, 'start', True) <> 0 then
     begin
       if not WizardSilent then
-        MsgBox('Служба АвтоВес не запустилась. Журнал: ' +
-          ExpandConstant('{commonappdata}\AvtoVes\logs'), mbError, MB_OK);
+        SuppressibleMsgBox('Служба АвтоВес не запустилась. Журнал: ' +
+          ExpandConstant('{commonappdata}\AvtoVes\logs'), mbError, MB_OK, IDOK);
     end
     else if FinalPort <> '' then
       WaitForWeb(FinalPort);
