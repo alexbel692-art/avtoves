@@ -11,6 +11,10 @@ on:
         description: 'Опубликовать в релизах'
         type: boolean
         default: true
+      test:
+        description: 'Проверки (имитация проезда при сборке, установка/обновление/удаление на чистой Windows)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,15 +38,18 @@ jobs:
 
       - name: Сборка установщика
         shell: pwsh
+        env:
+          TEST: ${{ inputs.test }}
         run: |
           if ($env:V -notmatch '^\d+\.\d+\.\d+$') { Write-Output "::error::Версия должна быть вида 1.2.3"; exit 1 }
-          .\build\build.ps1 -Version $env:V
+          if ($env:TEST -eq 'true') { .\build\build.ps1 -Version $env:V } else { .\build\build.ps1 -Version $env:V -NoTest }
 
       # Как на весовой: порт 8780 уже занят другой программой («детектор людей») →
       # тихая установка → служба на свободном порту → проезд машины пишется → программа АвтоВес.exe открывается →
       # обновление поверх (порт в настройках занят) — АвтоВес сам переезжает, база цела → удаление →
       # установка «только программа оператора».
       - name: Проверка установки
+        if: ${{ inputs.test }}
         shell: pwsh
         timeout-minutes: 30
         run: |
