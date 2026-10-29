@@ -1,4 +1,4 @@
-﻿﻿; Установщик АвтоВес (Inno Setup 6). Собирается build\build.ps1 — сначала он готовит build\stage.
+﻿; Установщик АвтоВес (Inno Setup 6). Собирается build\build.ps1 — сначала он готовит build\stage.
 ;   server — служба АвтоВес (Python, распознавание номеров, весы, светофоры)
 ;   client — программа оператора АвтоВес.exe (окно WebView2)
 #ifndef AppVer
