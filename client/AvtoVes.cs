@@ -5,6 +5,7 @@
 //   1) ключ --url http://server:8780/
 //   2) реестр HKLM\Software\AvtoVes, значение Url (установка «только программа оператора»)
 //   3) порт из C:\ProgramData\AvtoVes\config.yaml (сервер на этом же компьютере)
+// Ключ --page settings открывает сразу вкладку «Настройки».
 using System;
 using System.Diagnostics;
 using System.Drawing;
@@ -64,12 +65,23 @@ namespace AvtoVes
             catch { return null; }
         }
 
+        public static bool FixedUrl;   // адрес задан явно (ключ или реестр) — не пересчитывать
+
+        public static string Page(string[] args)
+        {
+            for (int i = 0; i < args.Length - 1; i++)
+                if (args[i] == "--page") return args[i + 1];
+            return null;
+        }
+
         public static string ServerUrl(string[] args)
         {
+            FixedUrl = true;
             for (int i = 0; i < args.Length - 1; i++)
                 if (args[i] == "--url") return Normalize(args[i + 1]);
             string url = Reg("Url");
             if (!string.IsNullOrEmpty(url)) return Normalize(url);
+            FixedUrl = false;
             return "http://localhost:" + LocalPort() + "/";
         }
 
@@ -107,14 +119,16 @@ namespace AvtoVes
     static class Program
     {
         [STAThread]
-        static void Main(string[] args)
+        static void Main(string[] argv)
         {
+            args = argv;
             bool created;
             Mutex mutex = new Mutex(true, @"Local\AvtoVes.Client", out created);
             if (!created)
             {
-                // программа уже открыта — показываем её окно
-                Native.PostMessage(Native.HWND_BROADCAST, Native.WM_SHOWME, IntPtr.Zero, IntPtr.Zero);
+                // программа уже открыта — показываем её окно (1 — сразу на вкладку «Настройки»)
+                Native.PostMessage(Native.HWND_BROADCAST, Native.WM_SHOWME,
+                    (IntPtr)(Settings.Page(args) == "settings" ? 1 : 0), IntPtr.Zero);
                 return;
             }
             Application.EnableVisualStyles();
@@ -127,11 +141,13 @@ namespace AvtoVes
                 Fallback(url);
                 return;
             }
-            Application.Run(new MainForm(url));
+            Application.Run(new MainForm(url, Settings.Page(args)));
             GC.KeepAlive(mutex);
         }
 
         // WebView2 нет (старый Windows Server без интернета) — открываем окном Edge или браузером
+        static string[] args = new string[0];
+
         static void Fallback(string url)
         {
             string[] edges = {
@@ -141,7 +157,8 @@ namespace AvtoVes
             foreach (string e in edges)
             {
                 if (!File.Exists(e)) continue;
-                Process.Start(e, "--app=" + url + " --user-data-dir=\"" + Path.Combine(Settings.DataDir, "Edge") + "\"");
+                string page = Settings.Page(args) == "settings" ? "#settings" : "";
+                Process.Start(e, "--app=" + url + page + " --user-data-dir=\"" + Path.Combine(Settings.DataDir, "Edge") + "\"");
                 return;
             }
             try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
@@ -155,16 +172,18 @@ namespace AvtoVes
 
     class MainForm : Form
     {
-        readonly string url;
+        string url;
+        string page;
         readonly WebView2 web = new WebView2();
         readonly System.Windows.Forms.Timer retry = new System.Windows.Forms.Timer();
         bool waiting;
         bool checking;
         string StateFile { get { return Path.Combine(Settings.DataDir, "window.txt"); } }
 
-        public MainForm(string url)
+        public MainForm(string url, string page)
         {
             this.url = url;
+            this.page = page;
             Text = "АвтоВес";
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             BackColor = Color.FromArgb(18, 20, 23);
@@ -227,6 +246,8 @@ namespace AvtoVes
         {
             if (checking) return;
             checking = true;
+            // сервер на этом компьютере: порт мог смениться в настройках — перечитываем
+            if (!Settings.FixedUrl) url = Settings.ServerUrl(new string[0]);
             string probe = url + "api/state";
             Task.Factory.StartNew(delegate
             {
@@ -246,7 +267,8 @@ namespace AvtoVes
                 if (!t.Result || IsDisposed) return;
                 retry.Stop();
                 waiting = false;
-                web.CoreWebView2.Navigate(url);
+                web.CoreWebView2.Navigate(url + (page == "settings" ? "#settings" : ""));
+                page = null;
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
@@ -267,6 +289,8 @@ namespace AvtoVes
         {
             if (m.Msg == Native.WM_SHOWME)
             {
+                if (m.WParam == (IntPtr)1 && web.CoreWebView2 != null && !waiting)
+                    web.CoreWebView2.ExecuteScriptAsync("location.hash='settings';document.querySelector('nav button[data-tab=settings]').click()");
                 if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Maximized;
                 Show();
                 Activate();

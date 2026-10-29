@@ -93,7 +93,7 @@ Type: filesandordirs; Name: "{app}\python"
 
 [Icons]
 Name: "{group}\АвтоВес"; Filename: "{app}\AvtoVes.exe"; Comment: "Рабочее место оператора весовой"; AppUserModelID: "AvtoVes.Client"
-Name: "{group}\Настройки АвтоВес"; Filename: "{win}\notepad.exe"; Parameters: """{commonappdata}\AvtoVes\config.yaml"""; IconFilename: "{app}\avtoves.ico"; Components: server
+Name: "{group}\Настройки АвтоВес"; Filename: "{app}\AvtoVes.exe"; Parameters: "--page settings"; Comment: "Адреса Moxa, светофоры, камеры, порт, 1С"; AppUserModelID: "AvtoVes.Client"
 Name: "{group}\Перезапустить АвтоВес"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -Command ""Start-Process -FilePath '{app}\AvtoVesService.exe' -ArgumentList 'restart' -Verb RunAs -WindowStyle Hidden"""; IconFilename: "{app}\avtoves.ico"; Comment: "Применить изменённые настройки"; Components: server
 Name: "{group}\Данные и снимки"; Filename: "{commonappdata}\AvtoVes\data"; Components: server
 Name: "{group}\Журналы"; Filename: "{commonappdata}\AvtoVes\logs"; Components: server
@@ -174,7 +174,7 @@ procedure InitializeWizard();
 begin
   HwPage := CreateInputQueryPage(wpSelectTasks,
     'Подключение оборудования', 'Весы и светофоры',
-    'Укажите адреса модулей Moxa в сети весовой. Позже их можно изменить в «Настройках АвтоВес».');
+    'Укажите адреса модулей Moxa в сети весовой. Всё это потом можно изменить в программе: АвтоВес → «Настройки».');
   HwPage.Add('IP-адрес Moxa NPort (весовой индикатор CAS CI-200A):', False);
   HwPage.Add('TCP-порт NPort (режим TCP Server):', False);
   HwPage.Add('IP-адрес Moxa ioLogik для светофоров (пусто — без светофоров):', False);

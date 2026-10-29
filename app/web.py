@@ -1,8 +1,11 @@
 """Веб-интерфейс оператора и API (включая обмен с 1С)."""
 from __future__ import annotations
 
+import asyncio
 import html
 import io
+import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +17,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from . import __version__
+from . import settings as st
 from .io_control import LIGHT_GREEN, LIGHT_OFF, LIGHT_RED
 from .plates import normalize, pretty
 
@@ -21,10 +25,8 @@ STATIC = Path(__file__).parent / "static"
 
 
 def build_app(ctx) -> Starlette:
-    """ctx: объект с полями cfg, scale, io, cameras, tracker, anpr, ctrl, db, sim."""
+    """ctx: Runtime — поля cfg, scale, io, cameras, tracker, anpr, ctrl, db, sim (меняются при применении настроек)."""
     cfg, db = ctx.cfg, ctx.db
-    cams = {c.id: c for c in ctx.cameras}
-    token = cfg["server"].get("api_token", "")
 
     async def index(_):
         return FileResponse(STATIC / "index.html")
@@ -45,7 +47,7 @@ def build_app(ctx) -> Starlette:
         })
 
     async def cam_jpg(request: Request):
-        cam = cams.get(request.path_params["cid"])
+        cam = next((c for c in ctx.cameras if c.id == request.path_params["cid"]), None)
         jpg = cam.jpeg() if cam else None
         if not jpg:
             return Response(status_code=204)
@@ -186,6 +188,7 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
 
     # ---------------------------------------------------------- обмен с 1С
     def _auth(request: Request) -> bool:
+        token = ctx.cfg["server"].get("api_token", "")
         return bool(token) and (request.headers.get("x-api-token") == token
                                 or request.query_params.get("token") == token)
 
@@ -217,6 +220,91 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         ok = ctx.sim.drive(plate, float(b.get("weight", 25000)), b.get("side", "a"))
         return JSONResponse({"ok": ok, "busy": not ok})
 
+    # ---------------------------------------------------------- настройки
+    sessions = st.Sessions()
+
+    def _protected() -> bool:
+        return bool(ctx.cfg["server"].get("settings_password"))
+
+    def _settings_ok(request: Request) -> bool:
+        return not _protected() or sessions.valid(request.headers.get("x-settings-token"))
+
+    def _deny():
+        return JSONResponse({"error": "нужен пароль настроек", "need_login": True}, 401)
+
+    async def settings_status(request: Request):
+        return JSONResponse({"protected": _protected(), "authorized": _settings_ok(request),
+                             "config_path": ctx.config_path})
+
+    async def settings_login(request: Request):
+        pw = str((await request.json()).get("password", ""))
+        stored = ctx.cfg["server"].get("settings_password", "")
+        if stored and st.check_password(pw, stored):
+            return JSONResponse({"token": sessions.new()})
+        await asyncio.sleep(1.0)
+        return JSONResponse({"error": "неверный пароль"}, 403)
+
+    async def settings_get(request: Request):
+        if not _settings_ok(request):
+            return _deny()
+        return JSONResponse(st.to_form(st.load_raw(ctx.config_path)))
+
+    async def settings_save(request: Request):
+        if not _settings_ok(request):
+            return _deny()
+        form = await request.json()
+        raw = st.load_raw(ctx.config_path)
+        try:
+            new = st.apply_form(raw, form)
+        except st.FormError as ex:
+            return JSONResponse({"error": "проверьте поля", "fields": ex.errors}, 422)
+        pw_changed = new["server"].get("settings_password") != raw.get("server", {}).get("settings_password")
+        st.save_raw(ctx.config_path, new)
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(None, ctx.reload)
+        logging.getLogger("settings").info("Настройки сохранены (%s)", request.client.host if request.client else "?")
+        out = {"ok": True, **res}
+        if pw_changed:
+            sessions.clear()
+            # тот, кто поставил пароль, остаётся в настройках; пароль снят — вход не нужен
+            out["token"] = sessions.new() if new["server"].get("settings_password") else None
+        return JSONResponse(out)
+
+    async def _run(fn, *a, timeout=25):
+        loop = asyncio.get_running_loop()
+        try:
+            return await asyncio.wait_for(loop.run_in_executor(None, fn, *a), timeout)
+        except asyncio.TimeoutError:
+            return {"ok": False, "message": "нет ответа (таймаут)"}
+
+    async def settings_test(request: Request):
+        if not _settings_ok(request):
+            return _deny()
+        kind = request.path_params["kind"]
+        b = await request.json()
+        try:
+            if kind == "scale":
+                return JSONResponse(await _run(st.test_scale, b, b.get("parser", "cas")))
+            if kind == "io":
+                return JSONResponse(await _run(st.test_io, b["host"], b.get("port", 502), b.get("unit_id", 1),
+                                               b.get("coil_base", 0), b.get("di_base", 0)))
+            if kind == "relay":
+                return JSONResponse(await _run(st.pulse_relay, b["host"], b.get("port", 502), b.get("unit_id", 1),
+                                               b.get("coil_base", 0), b["relay"]))
+            if kind == "camera":
+                return JSONResponse(await _run(st.test_camera, b["url"], timeout=30))
+        except (KeyError, ValueError, TypeError) as ex:
+            return JSONResponse({"ok": False, "message": f"не заполнено: {ex}"})
+        return JSONResponse({"error": "unknown"}, 404)
+
+    async def settings_restart(request: Request):
+        """Перезапуск службы (нужен после смены порта): процесс завершается, служба Windows поднимает его заново."""
+        if not _settings_ok(request):
+            return _deny()
+        logging.getLogger("settings").warning("Перезапуск по запросу из настроек")
+        asyncio.get_running_loop().call_later(1.0, os._exit, 3)
+        return JSONResponse({"ok": True})
+
     snap_dir = Path(cfg["data_dir"]) / "snapshots"
     return Starlette(routes=[
         Route("/", index),
@@ -240,6 +328,12 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         Route("/api/1c/trips", api_1c_trips),
         Route("/api/1c/ack", api_1c_ack, methods=["POST"]),
         Route("/api/sim/drive", sim_drive, methods=["POST"]),
+        Route("/api/settings/status", settings_status),
+        Route("/api/settings/login", settings_login, methods=["POST"]),
+        Route("/api/settings", settings_get),
+        Route("/api/settings", settings_save, methods=["POST"]),
+        Route("/api/settings/test/{kind}", settings_test, methods=["POST"]),
+        Route("/api/settings/restart", settings_restart, methods=["POST"]),
         Mount("/snapshots", StaticFiles(directory=str(snap_dir)), name="snapshots"),
         Mount("/static", StaticFiles(directory=str(STATIC)), name="static"),
     ])

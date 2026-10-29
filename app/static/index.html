@@ -15,6 +15,7 @@
     <button data-tab="journal">Журнал</button>
     <button data-tab="vehicles">Справочник ТС</button>
     <button data-tab="diag">Диагностика</button>
+    <button data-tab="settings">Настройки</button>
   </nav>
   <div class="status" id="hdrStatus"></div>
   <div class="clock" id="clock"></div>
@@ -167,6 +168,141 @@
       <button id="sDrive" class="primary">Проехать</button>
     </div>
   </div>
+</main>
+
+
+<!-- ===================== НАСТРОЙКИ ===================== -->
+<main id="tab-settings" class="tab">
+  <div class="card set-login" id="setLogin" hidden>
+    <div class="label">Настройки защищены паролем</div>
+    <div class="filters">
+      <input type="password" id="setPw" placeholder="Пароль настроек" autocomplete="current-password">
+      <button class="primary" id="setPwBtn">Войти</button>
+      <span class="err" id="setPwErr"></span>
+    </div>
+  </div>
+
+  <form id="setForm" class="set-form" hidden autocomplete="off">
+    <div class="set-bar card">
+      <div>
+        <b>Настройки АвтоВес</b>
+        <div class="muted" id="setPath"></div>
+      </div>
+      <div class="set-bar-btns">
+        <span class="set-msg" id="setMsg"></span>
+        <button type="button" id="setReload">Отменить изменения</button>
+        <button type="submit" class="primary">Сохранить и применить</button>
+      </div>
+    </div>
+
+    <section class="card">
+      <h3>Весы — индикатор CAS через Moxa NPort</h3>
+      <div class="grid">
+        <label>Подключение
+          <select name="scale.type"><option value="tcp">По сети — NPort, режим TCP Server</option>
+            <option value="serial">COM-порт — Real COM или кабель</option></select></label>
+        <label data-show="scale.type=tcp">IP-адрес NPort <input name="scale.host" placeholder="192.168.1.50"></label>
+        <label data-show="scale.type=tcp">TCP-порт <input name="scale.port" type="number" placeholder="4001"></label>
+        <label data-show="scale.type=serial">COM-порт <input name="scale.com" placeholder="COM3"></label>
+        <label data-show="scale.type=serial">Скорость
+          <select name="scale.baud"><option>2400</option><option>4800</option><option>9600</option><option>19200</option>
+            <option>38400</option><option>57600</option><option>115200</option></select></label>
+        <label>Формат данных
+          <select name="scale.parser"><option value="cas">CAS (ST,GS,… kg)</option><option value="generic">другой — последнее число в строке</option></select></label>
+      </div>
+      <div class="grid">
+        <label>Машина на весах от, кг <input name="scale.min_weight" type="number"></label>
+        <label>Весы свободны ниже, кг <input name="scale.empty_weight" type="number"></label>
+        <label>Вес стоит не меньше, с <input name="scale.stable_time" type="number" step="0.5"></label>
+        <label>Допустимое колебание, кг <input name="scale.stable_delta" type="number"></label>
+        <label>Нет данных дольше, с — «нет связи» <input name="scale.timeout_sec" type="number"></label>
+        <label class="chk"><input type="checkbox" name="scale.use_indicator_stable"> учитывать «СТАБ.» индикатора</label>
+      </div>
+      <div class="test"><button type="button" data-test="scale">Проверить связь с весами</button><div class="test-out" id="tScale"></div></div>
+    </section>
+
+    <section class="card">
+      <h3>Светофоры и шлагбаумы — Moxa ioLogik (Modbus TCP)</h3>
+      <label class="chk"><input type="checkbox" name="io.enabled"> светофоры подключены</label>
+      <div class="grid" data-show="io.enabled">
+        <label>IP-адрес ioLogik <input name="io.host" placeholder="192.168.1.60"></label>
+        <label>Порт Modbus <input name="io.port" type="number" placeholder="502"></label>
+        <label>Адрес устройства (Unit ID) <input name="io.unit_id" type="number"></label>
+        <label>Адрес первого реле <input name="io.coil_base" type="number"></label>
+        <label>Адрес первого входа <input name="io.di_base" type="number"></label>
+        <label>Импульс шлагбаума, с <input name="io.barrier_pulse_sec" type="number" step="0.1"></label>
+      </div>
+      <div data-show="io.enabled">
+        <div class="label" style="margin-top:12px">Номера реле (R0…R5), пусто — не подключено</div>
+        <div class="relays">
+          <label>А красный <input name="io.relays.a_red" type="number" min="0"></label>
+          <label>А зелёный <input name="io.relays.a_green" type="number" min="0"></label>
+          <label>Б красный <input name="io.relays.b_red" type="number" min="0"></label>
+          <label>Б зелёный <input name="io.relays.b_green" type="number" min="0"></label>
+          <label>Шлагбаум А <input name="io.relays.barrier_a" type="number" min="0"></label>
+          <label>Шлагбаум Б <input name="io.relays.barrier_b" type="number" min="0"></label>
+        </div>
+        <div class="label" style="margin-top:12px">ИК-барьеры по краям платформы (номер входа DI), пусто — нет</div>
+        <div class="relays">
+          <label>Барьер А <input name="io.inputs.ir_a" type="number" min="0"></label>
+          <label>Барьер Б <input name="io.inputs.ir_b" type="number" min="0"></label>
+          <label>Перекрыт, когда вход
+            <select name="io.ir_active_level"><option value="1">замкнут (1)</option><option value="0">разомкнут (0)</option></select></label>
+        </div>
+        <div class="test">
+          <button type="button" data-test="io">Проверить связь с ioLogik</button>
+          <span class="muted">Включить реле на 2 с:</span>
+          <span id="relayBtns"></span>
+          <div class="test-out" id="tIo"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>Камеры</h3>
+      <div class="muted">Камеры на въездах смотрят на передний номер подъезжающей машины.
+        Hikvision: <code>rtsp://логин:пароль@IP:554/Streaming/Channels/101</code>,
+        Dahua: <code>rtsp://логин:пароль@IP:554/cam/realmonitor?channel=1&amp;subtype=0</code></div>
+      <div id="camList"></div>
+      <button type="button" id="camAdd">+ Добавить камеру</button>
+    </section>
+
+    <section class="card">
+      <h3>Проезд и взвешивание</h3>
+      <div class="grid">
+        <label>Весы
+          <select name="weighing.mode"><option value="through">проездные — въезд и выезд с разных сторон</option>
+            <option value="reverse">тупиковые — въезд и выезд со стороны А</option></select></label>
+        <label class="chk"><input type="checkbox" name="weighing.auto_fix"> фиксировать вес автоматически</label>
+        <label>Весы пустые, с — снова зелёный на въезд <input name="weighing.clear_time" type="number" step="0.5"></label>
+        <label>Второе взвешивание в пределах, ч <input name="weighing.trip_max_hours" type="number"></label>
+        <label>Номер читается за, с до заезда <input name="weighing.plate_window_sec" type="number"></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>Распознавание номеров</h3>
+      <div class="grid">
+        <label>Мин. уверенность (0,1–0,99) <input name="anpr.min_confidence" type="number" step="0.05"></label>
+        <label>Распознавать кадр раз в, мс <input name="anpr.interval_ms" type="number" step="50"></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>Сеть, 1С и доступ</h3>
+      <div class="grid">
+        <label>Порт АвтоВес в сети <input name="server.port" type="number"></label>
+        <label class="wide">Токен для 1С (X-Api-Token)
+          <span class="inline"><input name="server.api_token"><button type="button" id="tokGen">Новый</button><button type="button" id="tokCopy">Копировать</button></span></label>
+      </div>
+      <div class="grid">
+        <label>Пароль на настройки <input name="server.new_password" type="password" placeholder="не менять" autocomplete="new-password"></label>
+        <label class="chk" id="pwClearWrap"><input type="checkbox" name="server.clear_password"> снять пароль</label>
+      </div>
+      <div class="muted" id="pwState"></div>
+      <label class="chk"><input type="checkbox" name="simulate"> режим проверки без оборудования (имитатор весов, светофоров и камер)</label>
+    </section>
+  </form>
 </main>
 
 <dialog id="dlg">

@@ -108,3 +108,35 @@ dialog label { display: grid; grid-template-columns: 110px 1fr; align-items: cen
   .two { grid-template-columns: 1fr; }
   .weight { font-size: 56px; }
 }
+
+/* ---------- настройки */
+[hidden] { display: none !important; }
+.grid .wide { grid-column: span 2; }
+#tab-settings { max-width: 1100px; }
+.set-form { display: grid; gap: 14px; }
+.set-form h3 { margin: 0 0 12px; font-size: 15px; }
+.set-bar { position: sticky; top: 0; z-index: 5; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.set-bar-btns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.set-msg { font-size: 13px; }
+.set-msg.ok { color: var(--ok); } .set-msg.bad { color: var(--bad); }
+.muted { color: var(--muted); font-size: 12px; }
+.muted code { color: var(--text); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px 14px; margin-bottom: 8px; }
+.grid label, .relays label, .cam-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.grid input, .grid select, .relays input, .relays select, .cam-row input, .cam-row select { color: var(--text); }
+label.chk { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 13px; margin: 6px 0; display: flex; }
+.relays { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px 12px; }
+.inline { display: flex; gap: 6px; } .inline input { flex: 1; min-width: 0; }
+.test { margin-top: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.test-out { flex-basis: 100%; font-size: 13px; }
+.test-out .ok { color: var(--ok); } .test-out .bad { color: var(--bad); }
+.test-out pre { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 6px 0 0; white-space: pre-wrap; }
+.test-out img { max-width: 420px; width: 100%; border-radius: 6px; margin-top: 6px; display: block; }
+#relayBtns button { padding: 4px 9px; font-size: 12px; }
+.cam-row { display: grid; grid-template-columns: 160px 130px 1fr auto; gap: 8px 10px; align-items: end; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.cam-row .cam-actions { display: flex; gap: 6px; align-items: center; }
+.cam-row .test-out { grid-column: 1 / -1; }
+.field-err { border-color: var(--bad) !important; }
+.err-text { color: var(--bad); font-size: 11px; }
+.err { color: var(--bad); }
+@media (max-width: 800px) { .cam-row { grid-template-columns: 1fr; } }
