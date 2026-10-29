@@ -1,0 +1,8 @@
+starlette>=0.40
+uvicorn>=0.30
+PyYAML>=6.0
+pyserial>=3.5
+openpyxl>=3.1
+numpy>=1.26
+opencv-python>=4.9
+fast-alpr[onnx]>=0.3

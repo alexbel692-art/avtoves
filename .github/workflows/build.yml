@@ -1,0 +1,108 @@
+name: АвтоВес — установщик Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия (например 1.0.0)'
+        required: true
+        default: '1.0.0'
+      publish:
+        description: 'Опубликовать в релизах'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  V: ${{ inputs.version }}
+  PYTHONUTF8: '1'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Сборка установщика
+        shell: pwsh
+        run: |
+          if ($env:V -notmatch '^\d+\.\d+\.\d+$') { Write-Output "::error::Версия должна быть вида 1.2.3"; exit 1 }
+          .\build\build.ps1 -Version $env:V
+
+      # Как на весовой: тихая установка → служба работает → проезд машины пишется →
+      # обновление поверх сохраняет базу → удаление убирает службу.
+      - name: Проверка установки
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setup = "dist\AvtoVes-Setup-$env:V.exe"
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=simulate','/PORT=8080','/LOG=install.log' -Wait
+          $svc = Get-Service AvtoVes
+          Write-Output "служба: $($svc.Status), запуск: $($svc.StartType)"
+          if ($svc.Status -ne 'Running') { Get-Content install.log -Tail 40; exit 1 }
+          $s = $null
+          for ($i=0; $i -lt 60; $i++) { try { $s = Invoke-RestMethod http://127.0.0.1:8080/api/state; break } catch { Start-Sleep 1 } }
+          if (-not $s) { Get-ChildItem C:\ProgramData\AvtoVes\logs | Get-Content -Tail 40; exit 1 }
+          Write-Output "АвтоВес $($s.version), весы на связи: $($s.scale.connected)"
+          if ($s.version -ne $env:V) { Write-Output "::error::версия $($s.version) вместо $env:V"; exit 1 }
+          $body = [Text.Encoding]::UTF8.GetBytes('{"plate":"А777МР50","weight":38460,"side":"a"}')
+          Invoke-RestMethod -Method Post http://127.0.0.1:8080/api/sim/drive -ContentType 'application/json; charset=utf-8' -Body $body | Out-Null
+          $t = @()
+          for ($i=0; $i -lt 60; $i++) { Start-Sleep 1; $r = Invoke-RestMethod http://127.0.0.1:8080/api/trips; $t = @($r); if ($t.Count) { break } }
+          if (-not $t.Count) { Write-Output "::error::взвешивание не записалось"; exit 1 }
+          Write-Output "рейс: $($t[0].plate) $($t[0].w1) кг"
+          if (-not (Test-Path "C:\ProgramData\AvtoVes\config.yaml")) { exit 1 }
+
+          Write-Output "--- обновление поверх"
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=update.log' -Wait
+          if ((Get-Service AvtoVes).Status -ne 'Running') { Get-Content update.log -Tail 40; exit 1 }
+          $t2 = $null
+          for ($i=0; $i -lt 60; $i++) { try { $r2 = Invoke-RestMethod http://127.0.0.1:8080/api/trips; $t2 = @($r2); break } catch { Start-Sleep 1 } }
+          if ($t2.Count -lt 1) { Write-Output "::error::после обновления пропала база"; exit 1 }
+          Write-Output "после обновления рейсов: $($t2.Count)"
+
+          Write-Output "--- удаление"
+          Start-Process "C:\Program Files\AvtoVes\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          Start-Sleep 5
+          if (Get-Service AvtoVes -ErrorAction SilentlyContinue) { Write-Output "::error::служба осталась после удаления"; exit 1 }
+          Write-Output "::notice title=Установщик::установка, проезд, обновление и удаление — в порядке"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs
+          retention-days: 7
+          path: |
+            install.log
+            update.log
+            C:\ProgramData\AvtoVes\logs\
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AvtoVes-Setup-${{ inputs.version }}
+          retention-days: 30
+          path: dist/*
+
+  release:
+    needs: windows
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: AvtoVes-Setup-${{ inputs.version }}
+          path: dist
+      - name: Релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$V" dist/* -R "$GITHUB_REPOSITORY" --title "АвтоВес $V" \
+            --notes "Установщик для Windows 10/11 и Windows Server 2016+ (x64). Скачайте AvtoVes-Setup-$V.exe и запустите. При обновлении настройки и база сохраняются."

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>АвтоВес</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="/static/favicon.ico">
+</head>
+<body>
+<header>
+  <div class="brand">АвтоВес <small id="ver"></small></div>
+  <nav>
+    <button data-tab="op" class="active">Оператор</button>
+    <button data-tab="journal">Журнал</button>
+    <button data-tab="vehicles">Справочник ТС</button>
+    <button data-tab="diag">Диагностика</button>
+  </nav>
+  <div class="status" id="hdrStatus"></div>
+  <div class="clock" id="clock"></div>
+</header>
+
+<!-- ===================== ОПЕРАТОР ===================== -->
+<main id="tab-op" class="tab active">
+  <section class="col-left">
+    <div class="card weight-card">
+      <div class="weight" id="weight">—</div>
+      <div class="weight-unit">кг</div>
+      <div class="flags">
+        <span id="fStable" class="flag">СТАБ.</span>
+        <span id="fConn" class="flag">СВЯЗЬ</span>
+        <span id="fOver" class="flag danger">ПЕРЕГРУЗ</span>
+      </div>
+    </div>
+
+    <div class="card state-card" id="stateCard">
+      <div class="state-text" id="stateText">—</div>
+      <div class="warning" id="warning"></div>
+    </div>
+
+    <div class="card plate-card">
+      <div class="label">Номер ТС</div>
+      <div class="plate-row">
+        <img id="plateCrop" alt="">
+        <div class="plate" id="plate">—</div>
+      </div>
+      <div class="plate-meta" id="plateMeta"></div>
+      <div class="plate-edit">
+        <input id="plateInput" placeholder="Ввести номер вручную: А123ВС77" autocomplete="off">
+        <button id="btnPlate">Применить</button>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="btnFix">Зафиксировать вес</button>
+      <button id="btnReset">Сбросить цикл</button>
+    </div>
+
+    <div class="card last-card" id="lastCard" hidden>
+      <div class="label">Последнее взвешивание</div>
+      <div id="lastBody"></div>
+    </div>
+  </section>
+
+  <section class="col-right">
+    <div class="lights card">
+      <div class="light-box" data-side="a">
+        <div class="tl"><i class="r"></i><i class="g"></i></div>
+        <div>
+          <div class="label">Сторона А</div>
+          <div class="light-btns">
+            <button data-light="a:red">Красный</button>
+            <button data-light="a:green">Зелёный</button>
+            <button data-barrier="a" hidden>Шлагбаум</button>
+          </div>
+        </div>
+      </div>
+      <div class="light-box" data-side="b">
+        <div class="tl"><i class="r"></i><i class="g"></i></div>
+        <div>
+          <div class="label">Сторона Б</div>
+          <div class="light-btns">
+            <button data-light="b:red">Красный</button>
+            <button data-light="b:green">Зелёный</button>
+            <button data-barrier="b" hidden>Шлагбаум</button>
+          </div>
+        </div>
+      </div>
+      <label class="manual"><input type="checkbox" id="manual"> Ручное управление</label>
+    </div>
+
+    <div class="cams" id="cams"></div>
+
+    <div class="two">
+      <div class="card">
+        <div class="label">События</div>
+        <ul class="events" id="events"></ul>
+      </div>
+      <div class="card">
+        <div class="label">Распознанные номера</div>
+        <ul class="events" id="reads"></ul>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ===================== ЖУРНАЛ ===================== -->
+<main id="tab-journal" class="tab">
+  <div class="filters card">
+    <label>С <input type="date" id="jFrom"></label>
+    <label>По <input type="date" id="jTo"></label>
+    <label>Номер <input id="jPlate" placeholder="часть номера"></label>
+    <label>Статус
+      <select id="jStatus"><option value="">все</option><option value="open">открытые</option>
+        <option value="closed">закрытые</option><option value="cancelled">отменённые</option></select>
+    </label>
+    <button id="jLoad" class="primary">Показать</button>
+    <button id="jXlsx">Excel</button>
+    <span id="jTotal" class="total"></span>
+  </div>
+  <div class="table-wrap card">
+    <table id="jTable">
+      <thead><tr><th>№</th><th>Номер</th><th>1-е взвеш.</th><th>Вес 1</th><th>2-е взвеш.</th><th>Вес 2</th>
+        <th>Нетто</th><th>Груз</th><th>Контрагент</th><th>Статус</th><th>1С</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</main>
+
+<!-- ===================== СПРАВОЧНИК ТС ===================== -->
+<main id="tab-vehicles" class="tab">
+  <form class="card vform" id="vForm">
+    <input name="plate" placeholder="Номер *" required>
+    <input name="model" placeholder="Марка/модель">
+    <input name="counterparty" placeholder="Контрагент">
+    <input name="driver" placeholder="Водитель">
+    <input name="tare" placeholder="Тара, кг" type="number">
+    <label><input type="checkbox" name="blocked"> стоп-лист</label>
+    <input name="comment" placeholder="Комментарий">
+    <button class="primary">Сохранить</button>
+  </form>
+  <div class="table-wrap card">
+    <table id="vTable">
+      <thead><tr><th>Номер</th><th>Модель</th><th>Контрагент</th><th>Водитель</th><th>Тара</th>
+        <th>Стоп</th><th>Комментарий</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</main>
+
+<!-- ===================== ДИАГНОСТИКА ===================== -->
+<main id="tab-diag" class="tab">
+  <div class="card">
+    <div class="label">Оборудование</div>
+    <div id="diagHw"></div>
+  </div>
+  <div class="card">
+    <div class="label">Последние строки от индикатора (сырые)</div>
+    <pre id="diagRaw"></pre>
+  </div>
+  <div class="card" id="simCard" hidden>
+    <div class="label">Имитация проезда</div>
+    <div class="filters">
+      <input id="sPlate" value="А123ВС77">
+      <input id="sWeight" value="32500" type="number"> кг
+      <select id="sSide"><option value="a">со стороны А</option><option value="b">со стороны Б</option></select>
+      <button id="sDrive" class="primary">Проехать</button>
+    </div>
+  </div>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="dlgForm">
+    <h3 id="dlgTitle"></h3>
+    <label>Номер <input name="plate"></label>
+    <label>Груз <input name="cargo"></label>
+    <label>Контрагент <input name="counterparty"></label>
+    <label>Водитель <input name="driver"></label>
+    <label>Комментарий <input name="comment"></label>
+    <label>Статус <select name="status"><option value="open">открыт</option>
+      <option value="closed">закрыт</option><option value="cancelled">отменён</option></select></label>
+    <div id="dlgSnaps" class="snaps"></div>
+    <div class="dlg-btns">
+      <button value="cancel">Отмена</button>
+      <button value="close1" id="dlgClose1" title="Закрыть по таре из справочника">Закрыть по таре</button>
+      <button value="save" class="primary">Сохранить</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

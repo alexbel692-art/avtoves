@@ -1,0 +1,76 @@
+# ============================================================
+#  АвтоВес — настройки
+#  Файл создан установщиком. После изменения перезапустите службу:
+#  Пуск → АвтоВес → «Перезапустить АвтоВес».
+#
+#  Весы: «Магистраль-2» БВ2-С-80 (НПВ 80 000 кг, e = 20/50 кг)
+#  Индикатор: CAS CI-200A, COM1 (RS-232) -> Moxa NPort
+# ============================================================
+
+# true — работа без оборудования (имитатор весов, светофоров и камер)
+simulate: __SIMULATE__
+
+server:
+  host: 0.0.0.0
+  port: __WEB_PORT__
+  # Токен для обмена с 1С (заголовок X-Api-Token). Создан случайно при установке.
+  api_token: "__TOKEN__"
+
+data_dir: data                 # база, снимки и журнал — рядом с этим файлом
+
+# ---------- Весы ----------
+scale:
+  # Moxa NPort в режиме TCP Server:      tcp://192.168.1.50:4001
+  # Moxa NPort в режиме Real COM (драйвер): serial://COM3?baud=9600
+  connection: tcp://__NPORT_HOST__:__NPORT_PORT__
+  parser: cas                  # cas — формат CAS CI (ST,GS,...kg); generic — последнее число в строке
+  data_len: 8
+  timeout_sec: 3               # нет данных дольше — «нет связи»
+  min_weight: 400              # кг, порог «машина на весах» (НмПВ)
+  empty_weight: 200            # кг, ниже — платформа свободна
+  stable_time: 3.0             # сек, сколько вес должен стоять
+  stable_delta: 50             # кг, допустимый разброс за stable_time
+  use_indicator_stable: true   # учитывать флаг ST индикатора
+
+# ---------- Светофоры, шлагбаумы, датчики: Moxa ioLogik E1214 (Modbus TCP) ----------
+io:
+  enabled: __IO_ENABLED__
+  host: __IO_HOST__
+  port: 502
+  unit_id: 1
+  coil_base: 0
+  di_base: 0
+  relays:                      # номера реле 0..5, null — не используется
+    a_red: 0
+    a_green: 1
+    b_red: 2
+    b_green: 3
+    barrier_a: null
+    barrier_b: null
+  barrier_pulse_sec: 1.0
+  inputs:                      # ИК-барьеры по краям платформы, null — нет
+    ir_a: null
+    ir_b: null
+  ir_active_level: 1
+
+# ---------- Логика проезда ----------
+weighing:
+  mode: __MODE__               # through — проездные весы; reverse — въезд и выезд с одной стороны
+  auto_fix: true               # фиксировать вес автоматически после стабилизации
+  clear_time: 3.0
+  trip_max_hours: 24           # второе взвешивание ищется в пределах N часов
+  plate_window_sec: 60
+
+# ---------- Распознавание номеров ----------
+anpr:
+  engine: fast_alpr
+  detector_model: yolo-v9-t-384-license-plate-end2end
+  ocr_model: cct-xs-v1-global-model
+  interval_ms: 300
+  min_confidence: 0.5
+  country: ru
+
+# ---------- Камеры ----------
+# Hikvision: rtsp://user:pass@IP:554/Streaming/Channels/101
+# Dahua:     rtsp://user:pass@IP:554/cam/realmonitor?channel=1&subtype=0
+__CAMERAS__

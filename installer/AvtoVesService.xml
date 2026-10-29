@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Служба Windows «АвтоВес» (WinSW). %BASE% — папка программы. -->
+<service>
+  <id>AvtoVes</id>
+  <name>АвтоВес — автомобильные весы</name>
+  <description>Весы, распознавание номеров, светофоры и веб-интерфейс оператора АвтоВес.</description>
+  <executable>%BASE%\python\python.exe</executable>
+  <arguments>-X utf8 "%BASE%\main.py" --config "%ProgramData%\AvtoVes\config.yaml"</arguments>
+  <workingdirectory>%BASE%</workingdirectory>
+  <env name="PYTHONUTF8" value="1"/>
+  <env name="PYTHONDONTWRITEBYTECODE" value="1"/>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>15 sec</stoptimeout>
+  <logpath>%ProgramData%\AvtoVes\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+</service>

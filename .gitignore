@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/
+build/stage/
+build/cache/
+dist/
+.venv/
