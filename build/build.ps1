@@ -35,7 +35,16 @@ $WV2Url     = "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/$WV2V
 $WV2BootUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"   # установщик среды WebView2 (Microsoft)
 
 function Step($t) { Write-Host ""; Write-Host "==> $t" -ForegroundColor Cyan }
-function Fail($t) { Write-Host "ОШИБКА: $t" -ForegroundColor Red; exit 1 }
+function Fail($t, $details) {
+  Write-Host "ОШИБКА: $t" -ForegroundColor Red
+  if ($details) { Write-Host ($details -join "`n") }
+  if ($env:GITHUB_ACTIONS) {
+    $d = if ($details) { " | " + ((@($details) | Select-Object -Last 15) -join " | ") } else { "" }
+    Write-Host ("::error title=Сборка::" + $t + $d)
+  }
+  exit 1
+}
+trap { Fail "$($_.Exception.Message) (строка $($_.InvocationInfo.ScriptLineNumber))" }
 
 function Get-File($Url, $Out, $Sha) {
   if (-not (Test-Path $Out)) {
@@ -63,7 +72,7 @@ foreach ($c in @("py -3.12", "py -3", "python")) {
 }
 if (-not $HostExe) { Fail "Не найден Python 3.10+ (нужен только для сборки). Установите: winget install Python.Python.3.12" }
 Write-Host "   $HostExe $HostArgs"
-function HostPy { & $HostExe @HostArgs @args; if ($LASTEXITCODE -ne 0) { Fail "python $args" } }
+function HostPy { $ErrorActionPreference = "Continue"; $o = & $HostExe @HostArgs @args 2>&1 | ForEach-Object { "$_" }; $o | ForEach-Object { Write-Host $_ }; if ($LASTEXITCODE -ne 0) { Fail "python $args" ($o | Select-Object -Last 15) } }
 
 # ---------------------------------------------------------------- подготовка папок
 Step "Подготовка"
@@ -127,10 +136,13 @@ print("распознавание работает, найдено номеро�
 '@
 $probeFile = Join-Path $Cache "probe_alpr.py"
 Set-Content -Path $probeFile -Encoding UTF8 -Value $probe
-& $Py -X utf8 $probeFile
+$ErrorActionPreference = "Continue"
+$probeOut = & $Py -X utf8 $probeFile 2>&1 | ForEach-Object { "$_" }
 $rc = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+$probeOut | ForEach-Object { Write-Host "   $_" }
 $env:USERPROFILE = $oldUP; $env:HOME = $oldHome
-if ($rc -ne 0) { Fail "распознавание номеров не запустилось" }
+if ($rc -ne 0) { Fail "распознавание номеров не запустилось" ($probeOut | Select-Object -Last 15) }
 $mcount = (Get-ChildItem $Models -Recurse -File | Measure-Object).Count
 if ($mcount -lt 2) { Fail "модели не скачались в $Models" }
 Get-ChildItem $Models -Recurse -File | ForEach-Object { Write-Host "   $($_.FullName.Substring($Models.Length)) $([math]::Round($_.Length/1MB,1)) МБ" }
@@ -218,13 +230,17 @@ $fw = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319"
 $verParts = ($Version.Split(".") + @("0","0","0","0"))[0..3] -join "."
 $asmInfo = Join-Path $Cache "AssemblyVersion.cs"
 Set-Content -Path $asmInfo -Encoding UTF8 -Value "[assembly: System.Reflection.AssemblyVersion(`"$verParts`")]`n[assembly: System.Reflection.AssemblyFileVersion(`"$verParts`")]`n[assembly: System.Reflection.AssemblyInformationalVersion(`"$Version`")]"
-& $csc /nologo /target:winexe /platform:x64 /optimize+ /codepage:65001 `
+$ErrorActionPreference = "Continue"
+$cscOut = & $csc /nologo /target:winexe /platform:x64 /optimize+ /codepage:65001 `
   "/out:$Cli\AvtoVes.exe" `
   "/win32icon:$Root\installer\avtoves.ico" "/win32manifest:$Root\client\AvtoVes.manifest" `
   "/r:$fw\System.dll" "/r:$fw\System.Core.dll" "/r:$fw\System.Drawing.dll" "/r:$fw\System.Windows.Forms.dll" `
   "/r:$Cli\Microsoft.Web.WebView2.Core.dll" "/r:$Cli\Microsoft.Web.WebView2.WinForms.dll" `
-  (Join-Path $Root "client\AvtoVes.cs") $asmInfo
-if ($LASTEXITCODE -ne 0) { Fail "программа АвтоВес.exe не скомпилировалась" }
+  (Join-Path $Root "client\AvtoVes.cs") $asmInfo 2>&1 | ForEach-Object { "$_" }
+$cscRc = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+$cscOut | Where-Object { $_ -match "warning|error" } | ForEach-Object { Write-Host "   $_" }
+if ($cscRc -ne 0) { Fail "программа АвтоВес.exe не скомпилировалась" ($cscOut | Where-Object { $_ -match "error" }) }
 Copy-Item (Join-Path $Root "client\AvtoVes.exe.config") $Cli
 Copy-Item (Join-Path $Root "installer\avtoves.ico") $Cli
 Copy-Item (Join-Path $Root "README.md") $Cli
@@ -253,8 +269,11 @@ if (-not $iscc) {
                    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe")) { if (Test-Path $c) { $iscc = $c; break } }
 }
 if (-not $iscc) { Fail "Установите Inno Setup 6: https://jrsoftware.org/isdl.php" }
-& $iscc /Q "/DAppVer=$Version" (Join-Path $Root "installer\avtoves.iss")
-if ($LASTEXITCODE -ne 0) { Fail "Inno Setup не собрал установщик" }
+$ErrorActionPreference = "Continue"
+$isOut = & $iscc /Q "/DAppVer=$Version" (Join-Path $Root "installer\avtoves.iss") 2>&1 | ForEach-Object { "$_" }
+$isRc = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($isRc -ne 0) { Fail "Inno Setup не собрал установщик" $isOut }
 
 $exe = Join-Path $Dist "AvtoVes-Setup-$Version.exe"
 $hh = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
