@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS vehicles (
 """
 
 
+# Колонки, добавленные после первой версии (старые базы дополняются при запуске)
+MIGRATIONS = {
+    "trips": {"gas_tare": "REAL", "gas_in": "REAL", "gas_out": "REAL"},
+    "vehicles": {"tank_l": "REAL"},
+}
+
+
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -64,7 +71,13 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
-        self.lock = threading.Lock()
+        for table, cols in MIGRATIONS.items():
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            for col, typ in cols.items():
+                if col not in have:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        self.conn.commit()
+        self.lock = threading.RLock()
 
     def q(self, sql: str, args=()) -> list[dict]:
         with self.lock:
@@ -105,7 +118,41 @@ class DB:
                          (plate, wid, ts, weight, (veh or {}).get("counterparty", ""),
                           (veh or {}).get("driver", ""), now_iso()))
         self.x("UPDATE weighings SET trip_id=? WHERE id=?", (tid, wid))
+        self.recalc_gas(tid)
         return {"weighing_id": wid, "trip": self.trip(tid)}
+
+    # ---------------------------------------------------------- газ (газовозы)
+    def recalc_gas(self, tid: int, force: bool = False):
+        """Газ в машине = вес − тара пустой машины (из справочника ТС).
+        Тара запоминается в рейсе при первом расчёте, чтобы история не менялась
+        при последующей правке справочника (force=True — пересчитать по текущей таре)."""
+        t = self.trip(tid)
+        if not t:
+            return
+        tare = t.get("gas_tare")
+        if tare is None or force:
+            veh = self.vehicle(t["plate"]) if t["plate"] else None
+            tare = (veh or {}).get("tare")
+        if not tare:
+            self.x("UPDATE trips SET gas_tare=NULL,gas_in=NULL,gas_out=NULL WHERE id=?", (tid,))
+            return
+        g_in = round(t["w1"] - tare, 1) if t["w1"] is not None else None
+        g_out = round(t["w2"] - tare, 1) if t["w2"] is not None else None
+        self.x("UPDATE trips SET gas_tare=?,gas_in=?,gas_out=? WHERE id=?", (tare, g_in, g_out, tid))
+
+    def set_tare_from_weighing(self, wid: int) -> dict:
+        """«Это пустая машина»: вес взвешивания становится тарой ТС в справочнике."""
+        w = self.q("SELECT * FROM weighings WHERE id=?", (wid,))
+        if not w or not w[0]["plate"]:
+            raise ValueError("у взвешивания нет номера ТС")
+        w = w[0]
+        veh = self.vehicle(w["plate"]) or {"plate": w["plate"]}
+        veh["tare"] = w["weight"]
+        self.save_vehicle(veh)
+        # рейсы этой машины без расчёта газа — досчитываем
+        for t in self.q("SELECT id FROM trips WHERE plate=? AND (gas_tare IS NULL OR id=?)", (w["plate"], w["trip_id"])):
+            self.recalc_gas(t["id"], force=True)
+        return self.vehicle(w["plate"])
 
     def trip(self, tid: int) -> dict | None:
         r = self.q("SELECT * FROM trips WHERE id=?", (tid,))
@@ -122,6 +169,7 @@ class DB:
         self.x(f"UPDATE trips SET {sets} WHERE id=?", (*f.values(), tid))
         if "plate" in f:
             self.x("UPDATE weighings SET plate=? WHERE trip_id=?", (f["plate"], tid))
+            self.recalc_gas(tid, force=True)
         return self.trip(tid)
 
     def close_trip_manually(self, tid: int) -> dict | None:
@@ -134,6 +182,7 @@ class DB:
         if tare:
             self.x("UPDATE trips SET gross=?,tare=?,net=?,direction='in',status='closed',updated=? WHERE id=?",
                    (t["w1"], tare, t["w1"] - tare, now_iso(), tid))
+            self.recalc_gas(tid)
         return self.trip(tid)
 
     def trips(self, date_from: str | None = None, date_to: str | None = None,
@@ -179,11 +228,18 @@ class DB:
         return self.q("SELECT * FROM vehicles ORDER BY plate")
 
     def save_vehicle(self, v: dict):
-        self.x("INSERT INTO vehicles(plate,model,counterparty,driver,tare,blocked,comment) "
-               "VALUES(:plate,:model,:counterparty,:driver,:tare,:blocked,:comment) "
+        v = {"model": "", "counterparty": "", "driver": "", "tare": None, "tank_l": None, "blocked": 0, "comment": "", **v}
+        old = self.vehicle(v["plate"])
+        self.x("INSERT INTO vehicles(plate,model,counterparty,driver,tare,tank_l,blocked,comment) "
+               "VALUES(:plate,:model,:counterparty,:driver,:tare,:tank_l,:blocked,:comment) "
                "ON CONFLICT(plate) DO UPDATE SET model=excluded.model,counterparty=excluded.counterparty,"
-               "driver=excluded.driver,tare=excluded.tare,blocked=excluded.blocked,comment=excluded.comment",
-               {"model": "", "counterparty": "", "driver": "", "tare": None, "blocked": 0, "comment": "", **v})
+               "driver=excluded.driver,tare=excluded.tare,tank_l=excluded.tank_l,blocked=excluded.blocked,"
+               "comment=excluded.comment",
+               {k: v[k] for k in ("plate", "model", "counterparty", "driver", "tare", "tank_l", "blocked", "comment")})
+        # тару указали впервые — досчитываем газ по рейсам этой машины, где его ещё нет
+        if v["tare"] and (not old or not old.get("tare")):
+            for t in self.q("SELECT id FROM trips WHERE plate=? AND gas_tare IS NULL", (v["plate"],)):
+                self.recalc_gas(t["id"])
 
     def delete_vehicle(self, plate: str):
         self.x("DELETE FROM vehicles WHERE plate=?", (plate,))

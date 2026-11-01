@@ -140,3 +140,15 @@ label.chk { flex-direction: row; align-items: center; gap: 8px; color: var(--tex
 .err-text { color: var(--bad); font-size: 11px; }
 .err { color: var(--bad); }
 @media (max-width: 800px) { .cam-row { grid-template-columns: 1fr; } }
+
+/* ---------- газ */
+.gas-box { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 13px; }
+.gas-box .k { color: var(--muted); }
+.gas-box .big2 { font-size: 18px; font-weight: 700; font-family: var(--mono); }
+.gas-box .pct { color: var(--muted); }
+.gas-hint { color: var(--accent); font-size: 12px; margin-top: 6px; }
+body.no-gas .gas-col { display: none; }
+td.gas-out { color: var(--ok); } td.gas-in { color: #4ea1ff; }
+.dlg-w { margin-top: 10px; font-size: 13px; }
+.dlg-w div { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.dlg-w button { font-size: 12px; padding: 3px 8px; }

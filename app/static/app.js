@@ -12,6 +12,20 @@ const kg = v => v === null || v === undefined ? "—" : Math.round(v).toLocaleSt
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const pretty = p => { const m = /^(\D)(\d{3})(\D{2})(\d{2,3})$/.exec(p || ""); return m ? m.slice(1).join(" ") : (p || ""); };
 const dt = s => s ? s.replace("T", " ").slice(0, 16) : "—";
+let GAS = { enabled: true, show_liters: true, name: "газ" };
+const lit = v => GAS.show_liters && v !== null && v !== undefined ? ` · ${kg(v)} л` : "";
+const pct = v => v !== null && v !== undefined ? ` · ${v}%` : "";
+function gasBox(g, t) {
+  if (!GAS.enabled) return "";
+  if (!g) return t && t.plate
+    ? `<div class="gas-hint">Газ не посчитан: нет тары пустой машины ${esc(pretty(t.plate))}. Укажите её в «Справочнике ТС» или нажмите в журнале «Пустая — запомнить тару».</div>` : "";
+  let h = `<div class="gas-box"><span class="k">${esc(GAS.name)}, тара</span><span>${kg(g.tare)} кг${g.tank_l ? ` · цистерна ${kg(g.tank_l)} л` : ""}</span>
+    <span class="k">при въезде</span><span><b>${kg(g.in_kg)} кг</b>${lit(g.in_l)}${pct(g.in_pct)}</span>`;
+  if (g.out_kg !== null && g.out_kg !== undefined)
+    h += `<span class="k">при выезде</span><span><b>${kg(g.out_kg)} кг</b>${lit(g.out_l)}${pct(g.out_pct)}</span>
+      <span class="k">${g.action}</span><span class="big2">${kg(Math.abs(g.delta_kg))} кг${GAS.show_liters && g.delta_l !== null ? ` · ${kg(Math.abs(g.delta_l))} л` : ""}</span>`;
+  return h + `</div>`;
+}
 
 // ---------------- вкладки
 $$("nav button").forEach(b => b.onclick = () => {
@@ -45,6 +59,7 @@ function refreshCams() {
 let lastCropKey = "";
 function render(s) {
   $("#clock").textContent = s.time;
+  if (s.gas) { GAS = s.gas; document.body.classList.toggle("no-gas", !GAS.enabled); }
   $("#ver").textContent = "v" + s.version;
   const sc = s.scale, io = s.io, c = s.ctrl;
   $("#hdrStatus").innerHTML =
@@ -95,6 +110,7 @@ function render(s) {
     $("#lastBody").innerHTML = `
       <div><span class="big">${kg(c.last.weight)} кг</span> · ${esc(pretty(c.last.plate) || "без номера")} · ${esc(c.last.kind)} взвешивание</div>
       ${t.status === "closed" ? `<div>Брутто ${kg(t.gross)} · Тара ${kg(t.tare)} · <b>Нетто ${kg(t.net)} кг</b></div>` : ""}
+      ${gasBox(c.last.gas, t)}
       <div><a href="/ticket/${t.id}" target="_blank">Талон №${t.id}</a> · <a href="#" data-edit="${t.id}">Изменить</a></div>`;
   }
 
@@ -153,12 +169,19 @@ async function loadJournal() {
       <td>${t.id}</td><td><b>${esc(pretty(t.plate) || "—")}</b></td>
       <td>${dt(t.w1_ts)}</td><td class="num">${kg(t.w1)}</td>
       <td>${dt(t.w2_ts)}</td><td class="num">${kg(t.w2)}</td>
-      <td class="num"><b>${kg(t.net)}</b></td><td>${esc(t.cargo)}</td><td>${esc(t.counterparty)}</td>
+      <td class="num"><b>${kg(t.net)}</b></td>
+      <td class="num gas-col gas-in">${t.gas ? kg(t.gas.in_kg) : "—"}</td>
+      <td class="num gas-col">${t.gas && t.gas.out_kg !== null ? kg(t.gas.out_kg) : "—"}</td>
+      <td class="num gas-col gas-out">${t.gas && t.gas.delta_kg !== null ? `${t.gas.action} ${kg(Math.abs(t.gas.delta_kg))}${GAS.show_liters ? ` (${kg(Math.abs(t.gas.delta_l))} л)` : ""}` : "—"}</td>
+      <td>${esc(t.cargo)}</td><td>${esc(t.counterparty)}</td>
       <td class="st-${t.status}">${stText[t.status]}</td><td>${t.exported_1c ? "✓" : ""}</td>
       <td><button data-edit="${t.id}">Изменить</button> <a href="/ticket/${t.id}" target="_blank">Талон</a></td>
     </tr>`).join("");
   const net = journal.filter(t => t.status === "closed").reduce((a, t) => a + (t.net || 0), 0);
-  $("#jTotal").textContent = `Рейсов: ${journal.length} · Нетто по закрытым: ${kg(net)} кг`;
+  const gOut = journal.reduce((a, t) => a + (t.gas && t.gas.delta_kg > 0 ? t.gas.delta_kg : 0), 0);
+  const gIn = journal.reduce((a, t) => a + (t.gas && t.gas.delta_kg < 0 ? -t.gas.delta_kg : 0), 0);
+  $("#jTotal").textContent = `Рейсов: ${journal.length} · Нетто по закрытым: ${kg(net)} кг` +
+    (GAS.enabled && (gOut || gIn) ? ` · Газ слито: ${kg(gOut)} кг · залито: ${kg(gIn)} кг` : "");
 }
 $("#jLoad").onclick = loadJournal;
 $("#jXlsx").onclick = () => location.href = "/api/trips.xlsx?" + jQuery();
@@ -174,6 +197,15 @@ document.addEventListener("click", async e => {
   for (const k of ["plate", "cargo", "counterparty", "driver", "comment", "status"]) f.elements[k].value = t[k] ?? "";
   $("#dlgClose1").hidden = t.status !== "open";
   const ws = await api(`/api/trips/${t.id}/weighings`);
+  $("#dlgWeighings").innerHTML = ws.map(w => `<div><span>${dt(w.ts)} — <b>${kg(w.weight)} кг</b></span>` +
+    (GAS.enabled && w.plate ? `<button type="button" data-tare="${w.id}" title="Записать этот вес как тару пустой машины в справочник ТС">Пустая — запомнить тару</button>` : "") +
+    `</div>`).join("");
+  $$("[data-tare]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Машина ${pretty(t.plate)} была пустой при этом взвешивании?\nВес запишется в справочник как тара, газ пересчитается.`)) return;
+    const r = await api(`/api/weighings/${b.dataset.tare}/tare`, {});
+    b.textContent = r.ok ? `тара ${kg(r.vehicle.tare)} кг ✓` : (r.error || "ошибка");
+    b.disabled = true;
+  });
   $("#dlgSnaps").innerHTML = ws.flatMap(w => w.snapshots.split(";").filter(Boolean))
     .map(s => `<a href="/snapshots/${s}" target="_blank"><img src="/snapshots/${s}"></a>`).join("");
   const dlg = $("#dlg");
@@ -195,11 +227,11 @@ async function loadVehicles() {
   const vs = await api("/api/vehicles");
   $("#vTable tbody").innerHTML = vs.map(v => `
     <tr><td><b>${esc(pretty(v.plate))}</b></td><td>${esc(v.model)}</td><td>${esc(v.counterparty)}</td>
-    <td>${esc(v.driver)}</td><td class="num">${kg(v.tare)}</td><td>${v.blocked ? "⛔" : ""}</td><td>${esc(v.comment)}</td>
+    <td>${esc(v.driver)}</td><td class="num">${kg(v.tare)}</td><td class="num">${kg(v.tank_l)}</td><td>${v.blocked ? "⛔" : ""}</td><td>${esc(v.comment)}</td>
     <td><button data-vedit='${esc(JSON.stringify(v))}'>Изменить</button> <button data-vdel="${esc(v.plate)}">Удалить</button></td></tr>`).join("");
   $$("[data-vedit]").forEach(b => b.onclick = () => {
     const v = JSON.parse(b.dataset.vedit), f = $("#vForm");
-    for (const k of ["plate", "model", "counterparty", "driver", "tare", "comment"]) f.elements[k].value = v[k] ?? "";
+    for (const k of ["plate", "model", "counterparty", "driver", "tare", "tank_l", "comment"]) f.elements[k].value = v[k] ?? "";
     f.elements.blocked.checked = !!v.blocked;
   });
   $$("[data-vdel]").forEach(b => b.onclick = async () => {
@@ -212,6 +244,7 @@ $("#vForm").onsubmit = async e => {
   const v = Object.fromEntries(new FormData(f));
   v.blocked = f.elements.blocked.checked ? 1 : 0;
   v.tare = v.tare ? +v.tare : null;
+  v.tank_l = v.tank_l ? +v.tank_l : null;
   await api("/api/vehicles", v);
   f.reset();
   loadVehicles();

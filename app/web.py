@@ -28,19 +28,51 @@ def build_app(ctx) -> Starlette:
     """ctx: Runtime — поля cfg, scale, io, cameras, tracker, anpr, ctrl, db, sim (меняются при применении настроек)."""
     cfg, db = ctx.cfg, ctx.db
 
+    def gas_cfg() -> dict:
+        g = ctx.cfg.get("gas") or {}
+        return {"enabled": bool(g.get("enabled", True)), "name": g.get("name") or "газ",
+                "density": float(g.get("density") or 0.54), "show_liters": bool(g.get("show_liters", True))}
+
+    def gas_info(t: dict) -> dict | None:
+        """Газ по рейсу: в машине при въезде/выезде, сколько слито (+) или залито (−), литры."""
+        if t.get("gas_in") is None:
+            return None
+        g = gas_cfg()
+        d = g["density"] or 0.54
+        g_in, g_out = t["gas_in"], t.get("gas_out")
+        delta = round(g_in - g_out, 1) if g_out is not None else None
+        veh = db.vehicle(t["plate"]) if t.get("plate") else None
+        tank = (veh or {}).get("tank_l")
+        lit = lambda kg: round(kg / d) if kg is not None else None  # noqa: E731
+        pct = lambda kg: round(kg / d / tank * 100) if (kg is not None and tank) else None  # noqa: E731
+        return {"tare": t.get("gas_tare"), "in_kg": g_in, "out_kg": g_out, "delta_kg": delta,
+                "in_l": lit(g_in), "out_l": lit(g_out), "delta_l": lit(delta),
+                "in_pct": pct(g_in), "out_pct": pct(g_out), "tank_l": tank,
+                "action": None if delta is None else ("слито" if delta >= 0 else "залито")}
+
+    def ctrl_state() -> dict:
+        c = ctx.ctrl.snapshot()
+        last = c.get("last")
+        if last and last.get("trip"):
+            fresh = db.trip(last["trip"]["id"]) or last["trip"]     # тару могли указать после взвешивания
+            last["trip"] = fresh
+            last["gas"] = gas_info(fresh) if gas_cfg()["enabled"] else None
+        return c
+
     async def index(_):
         return FileResponse(STATIC / "index.html")
 
     async def state(_):
         return JSONResponse({
             "version": __version__,
+            "gas": gas_cfg(),
             "time": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
             "simulate": bool(ctx.sim),
             "scale": ctx.scale.snapshot(),
             "io": ctx.io.snapshot(),
             "cameras": [c.snapshot() for c in ctx.cameras],
             "anpr_error": ctx.anpr.error,
-            "ctrl": ctx.ctrl.snapshot(),
+            "ctrl": ctrl_state(),
             "reads": [{"ts": datetime.fromtimestamp(r.ts).strftime("%H:%M:%S"), "camera": r.camera,
                        "plate": r.plate, "conf": round(r.conf, 2), "valid": r.valid}
                       for r in reversed(ctx.tracker.recent(12))],
@@ -99,7 +131,10 @@ def build_app(ctx) -> Starlette:
                     plate=q.get("plate") or None, status=q.get("status") or None)
 
     async def trips(request: Request):
-        return JSONResponse(db.trips(**_filters(request)))
+        rows = db.trips(**_filters(request))
+        for r in rows:
+            r["gas"] = gas_info(r)
+        return JSONResponse(rows)
 
     async def trip_patch(request: Request):
         tid = int(request.path_params["tid"])
@@ -123,15 +158,25 @@ def build_app(ctx) -> Starlette:
         ws.title = "Взвешивания"
         head = ["№", "Номер ТС", "1-е взвеш.", "Вес 1, кг", "2-е взвеш.", "Вес 2, кг", "Брутто, кг",
                 "Тара, кг", "Нетто, кг", "Груз", "Контрагент", "Водитель", "Статус", "Комментарий"]
+        gas_on = gas_cfg()["enabled"]
+        if gas_on:
+            head += ["Тара пустой, кг", "Газ при въезде, кг", "Газ при выезде, кг", "Слито(+)/залито(−), кг",
+                     "Газ при въезде, л", "Газ при выезде, л", "Слито/залито, л"]
         ws.append(head)
         for c in ws[1]:
             c.font = Font(bold=True)
         for r in rows:
-            ws.append([r["id"], r["plate"], r["w1_ts"], r["w1"], r["w2_ts"], r["w2"], r["gross"],
-                       r["tare"], r["net"], r["cargo"], r["counterparty"], r["driver"],
-                       {"open": "открыт", "closed": "закрыт", "cancelled": "отменён"}.get(r["status"]),
-                       r["comment"]])
-        for col, wdt in zip("ABCDEFGHIJKLMN", (6, 12, 20, 11, 20, 11, 11, 11, 11, 18, 24, 18, 10, 30)):
+            row = [r["id"], r["plate"], r["w1_ts"], r["w1"], r["w2_ts"], r["w2"], r["gross"],
+                   r["tare"], r["net"], r["cargo"], r["counterparty"], r["driver"],
+                   {"open": "открыт", "closed": "закрыт", "cancelled": "отменён"}.get(r["status"]),
+                   r["comment"]]
+            if gas_on:
+                g = gas_info(r) or {}
+                row += [g.get("tare"), g.get("in_kg"), g.get("out_kg"), g.get("delta_kg"),
+                        g.get("in_l"), g.get("out_l"), g.get("delta_l")]
+            ws.append(row)
+        for col, wdt in zip("ABCDEFGHIJKLMNOPQRSTU", (6, 12, 20, 11, 20, 11, 11, 11, 11, 18, 24, 18, 10, 30,
+                                                       14, 16, 16, 18, 14, 14, 14)):
             ws.column_dimensions[col].width = wdt
         buf = io.BytesIO()
         wb.save(buf)
@@ -149,6 +194,17 @@ def build_app(ctx) -> Starlette:
         ws = db.weighings_of_trip(t["id"])
         imgs = "".join(f'<img src="/snapshots/{e(s)}">' for w in ws for s in w["snapshots"].split(";")
                        if s.endswith("_plate.jpg"))
+        g = gas_info(t) if gas_cfg()["enabled"] else None
+        gas_rows = ""
+        if g:
+            gc = gas_cfg()
+            lt = (lambda v: f" ({fmt(v)} л)" if v is not None and gc["show_liters"] else "")  # noqa: E731
+            gas_rows = (f"<tr><td colspan=2><b>{e(gc['name'])}</b> — тара пустой машины {fmt(g['tare'])} кг</td></tr>"
+                        f"<tr><td>В машине при въезде</td><td>{fmt(g['in_kg'])} кг{lt(g['in_l'])}</td></tr>")
+            if g["out_kg"] is not None:
+                gas_rows += (f"<tr><td>В машине при выезде</td><td>{fmt(g['out_kg'])} кг{lt(g['out_l'])}</td></tr>"
+                             f"<tr><td>{'Слито' if g['delta_kg'] >= 0 else 'Залито'}</td>"
+                             f"<td class='n'>{fmt(abs(g['delta_kg']))} кг{lt(abs(g['delta_l']) if g['delta_l'] is not None else None)}</td></tr>")
         return HTMLResponse(f"""<!doctype html><meta charset="utf-8"><title>Талон №{t['id']}</title>
 <style>body{{font:14px Arial;margin:24px;max-width:700px}}td{{padding:4px 10px;border-bottom:1px solid #ccc}}
 h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;font-weight:bold}}
@@ -165,6 +221,7 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
 <tr><td>Брутто</td><td>{fmt(t['gross'])} кг</td></tr>
 <tr><td>Тара</td><td>{fmt(t['tare'])} кг</td></tr>
 <tr><td>Нетто</td><td class="n">{fmt(t['net'])} кг</td></tr>
+{gas_rows}
 <tr><td>Комментарий</td><td>{e(t['comment'])}</td></tr>
 </table>{imgs}
 <p style="margin-top:40px">Весовщик ______________ &nbsp;&nbsp;&nbsp; Водитель ______________</p>""")
@@ -177,10 +234,25 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         v["plate"], _ = normalize(v.get("plate", ""))
         if not v["plate"]:
             return JSONResponse({"error": "не указан номер"}, 400)
-        if v.get("tare") in ("", None):
-            v["tare"] = None
+        for k in ("tare", "tank_l"):
+            if v.get(k) in ("", None):
+                v[k] = None
+            else:
+                try:
+                    v[k] = float(v[k])
+                except (TypeError, ValueError):
+                    return JSONResponse({"error": f"{k}: введите число"}, 400)
         db.save_vehicle(v)
         return JSONResponse({"ok": True})
+
+    async def weighing_tare(request: Request):
+        """«Пустая машина — запомнить тару» по взвешиванию."""
+        try:
+            veh = db.set_tare_from_weighing(int(request.path_params["wid"]))
+        except ValueError as ex:
+            return JSONResponse({"error": str(ex)}, 400)
+        ctx.ctrl.event(f"Тара {veh['plate']}: {veh['tare']:.0f} кг")
+        return JSONResponse({"ok": True, "vehicle": veh})
 
     async def vehicle_delete(request: Request):
         db.delete_vehicle(request.path_params["plate"])
@@ -203,6 +275,7 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
             "gross": r["gross"], "tare": r["tare"], "net": r["net"],
             "direction": r["direction"], "cargo": r["cargo"], "counterparty": r["counterparty"],
             "driver": r["driver"], "comment": r["comment"],
+            "gas": gas_info(r),
         } for r in rows])
 
     async def api_1c_ack(request: Request):
@@ -325,6 +398,7 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         Route("/ticket/{tid:int}", ticket),
         Route("/api/vehicles", vehicles, methods=["GET", "POST"]),
         Route("/api/vehicles/{plate}", vehicle_delete, methods=["DELETE"]),
+        Route("/api/weighings/{wid:int}/tare", weighing_tare, methods=["POST"]),
         Route("/api/1c/trips", api_1c_trips),
         Route("/api/1c/ack", api_1c_ack, methods=["POST"]),
         Route("/api/sim/drive", sim_drive, methods=["POST"]),

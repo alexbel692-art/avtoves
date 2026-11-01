@@ -122,6 +122,7 @@ def to_form(raw: dict) -> dict:
         },
         "weighing": {k: w.get(k) for k in ("mode", "auto_fix", "clear_time", "trip_max_hours", "plate_window_sec")},
         "anpr": {"min_confidence": an.get("min_confidence"), "interval_ms": an.get("interval_ms")},
+        "gas": {k: c["gas"].get(k) for k in ("enabled", "name", "density", "show_liters")},
         "cameras": [{"id": cam.get("id", f"cam{i + 1}"), "name": cam.get("name", ""), "side": cam.get("side"),
                      "url": cam.get("url", ""), "anpr": bool(cam.get("anpr", True))}
                     for i, cam in enumerate(c.get("cameras") or [])],
@@ -227,6 +228,14 @@ def apply_form(raw: dict, f: dict) -> dict:
     a = f.get("anpr", {})
     out["anpr"]["min_confidence"] = _num(a.get("min_confidence"), "anpr.min_confidence", e, 0.1, 0.99)
     out["anpr"]["interval_ms"] = _num(a.get("interval_ms"), "anpr.interval_ms", e, 50, 5000, int)
+
+    gs = f.get("gas", {})
+    out["gas"] = {
+        "enabled": bool(gs.get("enabled")),
+        "name": (str(gs.get("name", "")).strip() or "газ")[:60],
+        "density": _num(gs.get("density", 0.54), "gas.density", e, 0.3, 1.5),
+        "show_liters": bool(gs.get("show_liters")),
+    }
 
     cams, ids = [], set()
     for n, cam in enumerate(f.get("cameras") or []):

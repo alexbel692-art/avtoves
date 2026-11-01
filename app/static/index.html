@@ -122,7 +122,8 @@
   <div class="table-wrap card">
     <table id="jTable">
       <thead><tr><th>№</th><th>Номер</th><th>1-е взвеш.</th><th>Вес 1</th><th>2-е взвеш.</th><th>Вес 2</th>
-        <th>Нетто</th><th>Груз</th><th>Контрагент</th><th>Статус</th><th>1С</th><th></th></tr></thead>
+        <th>Нетто</th><th class="gas-col">Газ въезд</th><th class="gas-col">Газ выезд</th><th class="gas-col">Слито / залито</th>
+        <th>Груз</th><th>Контрагент</th><th>Статус</th><th>1С</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -135,14 +136,15 @@
     <input name="model" placeholder="Марка/модель">
     <input name="counterparty" placeholder="Контрагент">
     <input name="driver" placeholder="Водитель">
-    <input name="tare" placeholder="Тара, кг" type="number">
+    <input name="tare" placeholder="Тара пустой, кг" type="number">
+    <input name="tank_l" placeholder="Объём цистерны, л" type="number">
     <label><input type="checkbox" name="blocked"> стоп-лист</label>
     <input name="comment" placeholder="Комментарий">
     <button class="primary">Сохранить</button>
   </form>
   <div class="table-wrap card">
     <table id="vTable">
-      <thead><tr><th>Номер</th><th>Модель</th><th>Контрагент</th><th>Водитель</th><th>Тара</th>
+      <thead><tr><th>Номер</th><th>Модель</th><th>Контрагент</th><th>Водитель</th><th>Тара пустой</th><th>Цистерна, л</th>
         <th>Стоп</th><th>Комментарий</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
@@ -281,6 +283,19 @@
     </section>
 
     <section class="card">
+      <h3>Газовозы — сколько газа в машине</h3>
+      <label class="chk"><input type="checkbox" name="gas.enabled"> считать газ: вес машины − тара пустой машины</label>
+      <div class="grid" data-show="gas.enabled">
+        <label>Название продукта <input name="gas.name" placeholder="СУГ (пропан-бутан)"></label>
+        <label>Плотность, кг/л <input name="gas.density" type="number" step="0.001"></label>
+        <label class="chk"><input type="checkbox" name="gas.show_liters"> показывать литры</label>
+      </div>
+      <div class="muted" data-show="gas.enabled">Тару пустой машины укажите в «Справочнике ТС» или нажмите «Пустая — запомнить тару»
+        у взвешивания в журнале. Плотность СУГ зависит от состава и температуры: пропан около 0,51, бутан около 0,58 кг/л
+        (при +15 °C); поставьте значение из паспорта продукции.</div>
+    </section>
+
+    <section class="card">
       <h3>Распознавание номеров</h3>
       <div class="grid">
         <label>Мин. уверенность (0,1–0,99) <input name="anpr.min_confidence" type="number" step="0.05"></label>
@@ -315,6 +330,7 @@
     <label>Комментарий <input name="comment"></label>
     <label>Статус <select name="status"><option value="open">открыт</option>
       <option value="closed">закрыт</option><option value="cancelled">отменён</option></select></label>
+    <div id="dlgWeighings" class="dlg-w"></div>
     <div id="dlgSnaps" class="snaps"></div>
     <div class="dlg-btns">
       <button value="cancel">Отмена</button>
