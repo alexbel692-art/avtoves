@@ -359,11 +359,10 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
             if kind == "scale":
                 return JSONResponse(await _run(st.test_scale, b, b.get("parser", "cas")))
             if kind == "io":
-                return JSONResponse(await _run(st.test_io, b["host"], b.get("port", 502), b.get("unit_id", 1),
-                                               b.get("coil_base", 0), b.get("di_base", 0)))
+                return JSONResponse(await _run(st.test_io, b))
             if kind == "relay":
-                return JSONResponse(await _run(st.pulse_relay, b["host"], b.get("port", 502), b.get("unit_id", 1),
-                                               b.get("coil_base", 0), b["relay"]))
+                ctx.io.hold(3.5)        # работающая программа не перебьёт проверку
+                return JSONResponse(await _run(st.pulse_relay, b, int(b["relay"])))
             if kind == "camera":
                 return JSONResponse(await _run(st.test_camera, b["url"], timeout=30))
         except (KeyError, ValueError, TypeError) as ex:

@@ -174,10 +174,10 @@ procedure InitializeWizard();
 begin
   HwPage := CreateInputQueryPage(wpSelectTasks,
     'Подключение оборудования', 'Весы и светофоры',
-    'Укажите адреса модулей Moxa в сети весовой. Всё это потом можно изменить в программе: АвтоВес → «Настройки».');
+    'Укажите адреса модулей в сети весовой. Всё это потом можно изменить в программе: АвтоВес → «Настройки».');
   HwPage.Add('IP-адрес Moxa NPort (весовой индикатор CAS CI-200A):', False);
   HwPage.Add('TCP-порт NPort (режим TCP Server):', False);
-  HwPage.Add('IP-адрес Moxa ioLogik для светофоров (пусто — без светофоров):', False);
+  HwPage.Add('IP-адрес модуля светофоров — Moxa ioLogik или ОВЕН МК210 (пусто — без светофоров; модуль выбирается в программе):', False);
   HwPage.Add('Порт АвтоВес в сети (должен быть свободен):', False);
   HwPage.Values[0] := ExpandConstant('{param:NPORT|192.168.1.50}');
   HwPage.Values[1] := ExpandConstant('{param:NPORTPORT|4001}');
@@ -300,7 +300,7 @@ begin
     S := S + 'Оборудование:' + NewLine +
       Space + 'Весы (NPort): ' + HwPage.Values[0] + ':' + HwPage.Values[1] + NewLine;
     if Trim(HwPage.Values[2]) <> '' then
-      S := S + Space + 'Светофоры (ioLogik): ' + HwPage.Values[2] + NewLine
+      S := S + Space + 'Светофоры (модуль реле): ' + HwPage.Values[2] + NewLine
     else
       S := S + Space + 'Светофоры: не подключены' + NewLine;
     if Trim(CamPage.Values[0]) <> '' then S := S + Space + 'Камера А: задана' + NewLine;

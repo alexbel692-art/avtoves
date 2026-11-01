@@ -224,18 +224,24 @@
     </section>
 
     <section class="card">
-      <h3>Светофоры и шлагбаумы — Moxa ioLogik (Modbus TCP)</h3>
+      <h3>Светофоры и шлагбаумы — модуль реле по сети (Modbus TCP)</h3>
       <label class="chk"><input type="checkbox" name="io.enabled"> светофоры подключены</label>
       <div class="grid" data-show="io.enabled">
-        <label>IP-адрес ioLogik <input name="io.host" placeholder="192.168.1.60"></label>
+        <label>Модуль
+          <select name="io.device"><option value="moxa">Moxa ioLogik E1214 / E1214-T</option>
+            <option value="owen">ОВЕН МК210-301</option></select></label>
+        <label>IP-адрес модуля <input name="io.host" placeholder="192.168.1.60"></label>
         <label>Порт Modbus <input name="io.port" type="number" placeholder="502"></label>
         <label>Адрес устройства (Unit ID) <input name="io.unit_id" type="number"></label>
-        <label>Адрес первого реле <input name="io.coil_base" type="number"></label>
-        <label>Адрес первого входа <input name="io.di_base" type="number"></label>
+        <label data-show="io.device=moxa">Адрес первого реле <input name="io.coil_base" type="number"></label>
+        <label data-show="io.device=moxa">Адрес первого входа <input name="io.di_base" type="number"></label>
+        <label data-show="io.device=owen">Регистр записи выходов <input name="io.out_reg" type="number" placeholder="470"></label>
+        <label data-show="io.device=owen">Регистр состояния выходов <input name="io.out_state_reg" type="number" placeholder="468"></label>
+        <label data-show="io.device=owen">Регистр входов <input name="io.in_reg" type="number" placeholder="51"></label>
         <label>Импульс шлагбаума, с <input name="io.barrier_pulse_sec" type="number" step="0.1"></label>
       </div>
       <div data-show="io.enabled">
-        <div class="label" style="margin-top:12px">Номера реле (R0…R5), пусто — не подключено</div>
+        <div class="label" style="margin-top:12px" id="relayHint">Номера реле, пусто — не подключено</div>
         <div class="relays">
           <label>А красный <input name="io.relays.a_red" type="number" min="0"></label>
           <label>А зелёный <input name="io.relays.a_green" type="number" min="0"></label>
@@ -244,7 +250,7 @@
           <label>Шлагбаум А <input name="io.relays.barrier_a" type="number" min="0"></label>
           <label>Шлагбаум Б <input name="io.relays.barrier_b" type="number" min="0"></label>
         </div>
-        <div class="label" style="margin-top:12px">ИК-барьеры по краям платформы (номер входа DI), пусто — нет</div>
+        <div class="label" style="margin-top:12px" id="inputHint">ИК-барьеры по краям платформы (номер входа DI), пусто — нет</div>
         <div class="relays">
           <label>Барьер А <input name="io.inputs.ir_a" type="number" min="0"></label>
           <label>Барьер Б <input name="io.inputs.ir_b" type="number" min="0"></label>
@@ -252,8 +258,8 @@
             <select name="io.ir_active_level"><option value="1">замкнут (1)</option><option value="0">разомкнут (0)</option></select></label>
         </div>
         <div class="test">
-          <button type="button" data-test="io">Проверить связь с ioLogik</button>
-          <span class="muted">Включить реле на 2 с:</span>
+          <button type="button" data-test="io">Проверить связь с модулем</button>
+          <span class="muted">Включить выход на 2 с:</span>
           <span id="relayBtns"></span>
           <div class="test-out" id="tIo"></div>
         </div>

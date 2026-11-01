@@ -19,8 +19,9 @@ DEFAULTS = {
         "stable_time": 3.0, "stable_delta": 50, "use_indicator_stable": True,
     },
     "io": {
-        "enabled": True, "host": "127.0.0.1", "port": 502, "unit_id": 1,
-        "coil_base": 0, "di_base": 0, "relays": {}, "inputs": {},
+        "enabled": True, "device": "moxa", "host": "127.0.0.1", "port": 502, "unit_id": 1,
+        "coil_base": 0, "di_base": 0, "out_reg": 470, "out_state_reg": 468, "in_reg": 51,
+        "relays": {}, "inputs": {},
         "barrier_pulse_sec": 1.0, "ir_active_level": 1,
     },
     "weighing": {

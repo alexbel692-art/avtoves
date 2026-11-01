@@ -55,7 +55,7 @@ class Runtime:
         if cfg["simulate"]:
             sim = self._sim_world()
             cfg["scale"]["connection"] = f"tcp://127.0.0.1:{SIM_SCALE_PORT}"
-            cfg["io"].update(enabled=True, host="127.0.0.1", port=SIM_IO_PORT, coil_base=0, di_base=0)
+            cfg["io"].update(enabled=True, device="moxa", host="127.0.0.1", port=SIM_IO_PORT, coil_base=0, di_base=0)
             cfg["io"]["relays"] = {"a_red": 0, "a_green": 1, "b_red": 2, "b_green": 3,
                                    "barrier_a": None, "barrier_b": None}
             cfg["io"]["inputs"] = {"ir_a": None, "ir_b": None}

@@ -113,7 +113,9 @@ def to_form(raw: dict) -> dict:
             "timeout_sec": sc.get("timeout_sec"),
         },
         "io": {
-            "enabled": bool(io.get("enabled")), "host": io.get("host", ""), "port": io.get("port", 502),
+            "enabled": bool(io.get("enabled")), "device": "owen" if io.get("device") == "owen" else "moxa",
+            "out_reg": io.get("out_reg", 470), "out_state_reg": io.get("out_state_reg", 468), "in_reg": io.get("in_reg", 51),
+            "host": io.get("host", ""), "port": io.get("port", 502),
             "unit_id": io.get("unit_id", 1), "coil_base": io.get("coil_base", 0), "di_base": io.get("di_base", 0),
             "relays": {k: relays.get(k) for k in RELAYS},
             "inputs": {k: inputs.get(k) for k in INPUTS},
@@ -204,6 +206,12 @@ def apply_form(raw: dict, f: dict) -> dict:
 
     i = f.get("io", {})
     out["io"]["enabled"] = bool(i.get("enabled"))
+    owen = i.get("device") == "owen"
+    out["io"]["device"] = "owen" if owen else "moxa"
+    if owen:
+        out["io"]["out_reg"] = _num(i.get("out_reg", 470), "io.out_reg", e, 0, 65535, int)
+        out["io"]["out_state_reg"] = _num(i.get("out_state_reg", 468), "io.out_state_reg", e, 0, 65535, int)
+        out["io"]["in_reg"] = _num(i.get("in_reg", 51), "io.in_reg", e, 0, 65535, int)
     out["io"]["host"] = _host(i.get("host"), "io.host", e, required=out["io"]["enabled"] and not out["simulate"]) \
         or out["io"].get("host") or "192.168.1.60"
     out["io"]["port"] = _num(i.get("port"), "io.port", e, 1, 65535, int)
@@ -215,6 +223,16 @@ def apply_form(raw: dict, f: dict) -> dict:
     if len(used) != len(set(used)):
         e["io.relays"] = "один номер реле указан дважды"
     out["io"]["inputs"] = {k: _relay((i.get("inputs") or {}).get(k), f"io.inputs.{k}", e) for k in INPUTS}
+    if owen:   # у ОВЕН выходы DO1…DO8 и входы DI1…DI6 — нумерация с единицы
+        for grp, hi in (("relays", 8), ("inputs", 6)):
+            for k, v in out["io"][grp].items():
+                if v is not None and not 1 <= v <= hi:
+                    e[f"io.{grp}.{k}"] = f"у ОВЕН от 1 до {hi}"
+    else:
+        for grp, hi in (("relays", 5), ("inputs", 5)):
+            for k, v in out["io"][grp].items():
+                if v is not None and not 0 <= v <= hi:
+                    e[f"io.{grp}.{k}"] = f"у Moxa от 0 до {hi}"
     out["io"]["ir_active_level"] = 0 if str(i.get("ir_active_level")) == "0" else 1
     out["io"]["barrier_pulse_sec"] = _num(i.get("barrier_pulse_sec", 1), "io.barrier_pulse_sec", e, 0.2, 10)
 
@@ -317,32 +335,46 @@ def test_scale(conn: dict, parser: str, seconds: float = 4.0) -> dict:
             if last.weight is not None else "перегруз", "lines": lines[-5:]}
 
 
-def test_io(host: str, port: int, unit: int, coil_base: int = 0, di_base: int = 0) -> dict:
+def _io_backend(b: dict):
+    from .io_control import make_backend
     from .modbus import ModbusTCP
-    m = ModbusTCP(str(host).strip(), int(port), int(unit), timeout=3)
+    m = ModbusTCP(str(b.get("host", "")).strip(), int(b.get("port") or 502), int(b.get("unit_id") or 1), timeout=3)
+    return m, make_backend(b, m)
+
+
+def test_io(b: dict) -> dict:
+    """Связь с модулем светофоров: состояние выходов и входов."""
+    from .io_control import DEVICES
+    dev = DEVICES["owen" if b.get("device") == "owen" else "moxa"]
+    m, be = _io_backend(b)
     try:
-        coils = m.read_coils(int(coil_base), 6)
+        outs = be.read_outputs(dev["outputs"])
         try:
-            ins = m.read_inputs(int(di_base), 6)
+            ins = be.read_inputs(list(range(dev["first"], dev["first"] + dev["inputs"])))
         except Exception:  # noqa: BLE001
-            ins = []
-        return {"ok": True, "message": "модуль отвечает",
-                "relays": ["вкл" if c else "выкл" for c in coils],
-                "inputs": ["1" if x else "0" for x in ins]}
+            ins = {}
+        f = dev["first"]
+        pre = "R" if f == 0 else "DO"
+        return {"ok": True, "message": f"{dev['name']} отвечает",
+                "relays": [f"{pre}{i + f}: {'вкл' if v else 'выкл'}" for i, v in enumerate(outs)],
+                "inputs": [f"DI{n}: {'1' if v else '0'}" for n, v in sorted(ins.items())]}
     except Exception as ex:  # noqa: BLE001
         return {"ok": False, "message": f"нет ответа: {ex}"}
     finally:
         m.close()
 
 
-def pulse_relay(host: str, port: int, unit: int, coil_base: int, relay: int, sec: float = 2.0) -> dict:
-    from .modbus import ModbusTCP
-    m = ModbusTCP(str(host).strip(), int(port), int(unit), timeout=3)
+def pulse_relay(b: dict, relay: int, sec: float = 2.0) -> dict:
+    """Включить один выход на sec секунд (найти, какой светофор на каком реле)."""
+    m, be = _io_backend(b)
+    name = (f"R{relay}" if b.get("device") != "owen" else f"DO{relay}")
     try:
-        m.write_coil(int(coil_base) + int(relay), True)
+        if b.get("device") == "owen":       # не трогаем остальные выходы: берём текущую маску
+            be.mask = m.read_holding(be.out_state_reg, 1)[0]
+        be.write({int(relay): True})
         time.sleep(sec)
-        m.write_coil(int(coil_base) + int(relay), False)
-        return {"ok": True, "message": f"реле {relay} включалось на {sec:.0f} с"}
+        be.write({int(relay): False})
+        return {"ok": True, "message": f"{name} включался на {sec:.0f} с"}
     except Exception as ex:  # noqa: BLE001
         return {"ok": False, "message": f"ошибка: {ex}"}
     finally:

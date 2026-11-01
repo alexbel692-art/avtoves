@@ -136,6 +136,19 @@ def start_modbus_server(world: SimWorld, port: int = 15020):
                         if src[addr + i]:
                             data[i // 8] |= 1 << (i % 8)
                     resp = bytes([fc, nbytes]) + bytes(data)
+                elif fc == 6:      # ОВЕН МК210: регистр 470 — маска выходов DO1…DO8
+                    addr, val = struct.unpack(">HH", pdu[1:5])
+                    if addr == 470:
+                        for i in range(8):
+                            world.coils[i] = bool(val >> i & 1)
+                    resp = pdu
+                elif fc in (3, 4):
+                    addr, cnt = struct.unpack(">HH", pdu[1:5])
+                    regs = []
+                    for a in range(addr, addr + cnt):
+                        src = world.inputs if a == 51 else world.coils if a in (468, 470) else None
+                        regs.append(sum(1 << i for i in range(8) if src and src[i]) if src else 0)
+                    resp = bytes([fc, 2 * cnt]) + struct.pack(f">{cnt}H", *regs)
                 else:
                     resp = bytes([fc | 0x80, 1])
                 s.sendall(struct.pack(">HHHB", tid, 0, len(resp) + 1, unit) + resp)

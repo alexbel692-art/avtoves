@@ -251,7 +251,7 @@ $("#vForm").onsubmit = async e => {
 };
 
 // ================================================================ НАСТРОЙКИ
-const Set = (() => {
+const SettingsUI = (() => {
   let token = null;
   try { token = sessionStorage.getItem("avtoves.settings") } catch (e) {}
   let loaded = null;
@@ -297,7 +297,7 @@ const Set = (() => {
     $("#pwState").textContent = d.server.protected ? "Пароль на настройки установлен." : "Пароля нет — настройки может изменить любой, кто открыл АвтоВес.";
     $("#pwClearWrap").hidden = !d.server.protected;
     renderCams(d.cameras || []);
-    renderRelayBtns();
+    lastDevice = null; onDevice();
     clearErrors();
     toggle();
   }
@@ -362,15 +362,39 @@ const Set = (() => {
     try {
       const r = await sapi("/api/settings/test/" + kind, body);
       let h = `<span class="${r.ok ? "ok" : "bad"}">${r.ok ? "✓" : "✕"} ${esc(r.message || r.error || "")}</span>`;
-      if (r.relays) h += `<pre>Реле R0–R5: ${r.relays.join(" · ")}${r.inputs?.length ? "\nВходы DI0–DI5: " + r.inputs.join(" · ") : ""}</pre>`;
+      if (r.relays) h += `<pre>Выходы: ${r.relays.join(" · ")}${r.inputs?.length ? "\nВходы: " + r.inputs.join(" · ") : ""}</pre>`;
       if (r.lines?.length) h += `<pre>${r.lines.map(l => esc(l.replace(/[\x00-\x1f\x7f-\x9f]/g, "·"))).join("\n")}</pre>`;
       if (r.image) h += `<img src="${r.image}" alt="">`;
       out.innerHTML = h;
     } catch (e) { if (e.message !== "login") out.innerHTML = `<span class="bad">✕ ${esc(e.message)}</span>`; }
   }
   const val = n => form.elements[n].value.trim();
-  const ioBody = () => ({ host: val("io.host"), port: +val("io.port") || 502, unit_id: +val("io.unit_id") || 0,
-                          coil_base: +val("io.coil_base") || 0, di_base: +val("io.di_base") || 0 });
+  const ioBody = () => ({ device: val("io.device"), host: val("io.host"), port: +val("io.port") || 502,
+                          unit_id: +val("io.unit_id") || 0, coil_base: +val("io.coil_base") || 0, di_base: +val("io.di_base") || 0,
+                          out_reg: +val("io.out_reg") || 470, out_state_reg: +val("io.out_state_reg") || 468, in_reg: +val("io.in_reg") || 51 });
+  // модули реле: нумерация как на корпусе
+  const IO_DEV = {
+    moxa: { outs: [0, 1, 2, 3, 4, 5], pre: "R", ins: "DI0…DI5",
+            relays: { a_red: 0, a_green: 1, b_red: 2, b_green: 3, barrier_a: null, barrier_b: null } },
+    owen: { outs: [1, 2, 3, 4, 5, 6, 7, 8], pre: "DO", ins: "DI1…DI6",
+            relays: { a_red: 1, a_green: 2, b_red: 3, b_green: 4, barrier_a: null, barrier_b: null } },
+  };
+  const curRelays = () => Object.fromEntries(Object.keys(IO_DEV.moxa.relays).map(k => {
+    const v = form.elements["io.relays." + k].value.trim(); return [k, v === "" ? null : +v]; }));
+  const sameMap = (a, b) => Object.keys(b).every(k => a[k] === b[k]);
+  let lastDevice = null;
+  function onDevice() {
+    const d = val("io.device") || "moxa", D = IO_DEV[d];
+    // переключили модуль, а номера реле стандартные от другого модуля — подставляем стандартные для нового
+    if (lastDevice && lastDevice !== d && sameMap(curRelays(), IO_DEV[lastDevice].relays))
+      for (const [k, v] of Object.entries(D.relays)) form.elements["io.relays." + k].value = v ?? "";
+    lastDevice = d;
+    $("#relayHint").textContent = `Номера выходов (${D.pre}${D.outs[0]}…${D.pre}${D.outs.at(-1)}, как на корпусе), пусто — не подключено`;
+    $("#inputHint").textContent = `ИК-барьеры по краям платформы (номер входа ${D.ins}), пусто — нет`;
+    form.elements["io.port"].placeholder = "502";
+    renderRelayBtns();
+  }
+  form.elements["io.device"].addEventListener("change", onDevice);
   $$("[data-test]", form).forEach(b => b.onclick = () => {
     if (b.dataset.test === "scale")
       runTest("scale", { type: val("scale.type"), host: val("scale.host"), port: +val("scale.port") || 4001,
@@ -378,7 +402,8 @@ const Set = (() => {
     else runTest("io", ioBody(), $("#tIo"));
   });
   function renderRelayBtns() {
-    $("#relayBtns").innerHTML = [0, 1, 2, 3, 4, 5].map(i => `<button type="button" data-relay="${i}">R${i}</button>`).join(" ");
+    const D = IO_DEV[val("io.device") || "moxa"];
+    $("#relayBtns").innerHTML = D.outs.map(i => `<button type="button" data-relay="${i}">${D.pre}${i}</button>`).join(" ");
     $$("[data-relay]").forEach(b => b.onclick = () => runTest("relay", { ...ioBody(), relay: +b.dataset.relay }, $("#tIo")));
   }
 
@@ -440,5 +465,5 @@ const Set = (() => {
   return { open };
 })();
 
-$$("nav button[data-tab=settings]").forEach(b => b.addEventListener("click", () => Set.open()));
+$$("nav button[data-tab=settings]").forEach(b => b.addEventListener("click", () => SettingsUI.open()));
 if (location.hash === "#settings") $("nav button[data-tab=settings]").click();

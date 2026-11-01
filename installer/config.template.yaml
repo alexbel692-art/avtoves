@@ -32,9 +32,11 @@ scale:
   stable_delta: 50             # кг, допустимый разброс за stable_time
   use_indicator_stable: true   # учитывать флаг ST индикатора
 
-# ---------- Светофоры, шлагбаумы, датчики: Moxa ioLogik E1214 (Modbus TCP) ----------
+# ---------- Светофоры, шлагбаумы, датчики (Modbus TCP) ----------
+# device: moxa — Moxa ioLogik E1214 (реле R0…R5); owen — ОВЕН МК210-301 (выходы DO1…DO8)
 io:
   enabled: __IO_ENABLED__
+  device: moxa
   host: __IO_HOST__
   port: 502
   unit_id: 1

@@ -71,6 +71,16 @@ class ModbusTCP:
     def read_inputs(self, addr: int, count: int) -> list[bool]:
         return self._bits(self._request(struct.pack(">BHH", 2, addr, count)), count)
 
+    # FC03
+    def read_holding(self, addr: int, count: int = 1) -> list[int]:
+        resp = self._request(struct.pack(">BHH", 3, addr, count))
+        n = resp[1] // 2
+        return list(struct.unpack(f">{n}H", resp[2:2 + 2 * n]))
+
+    # FC06
+    def write_register(self, addr: int, value: int):
+        self._request(struct.pack(">BHH", 6, addr, value & 0xFFFF))
+
     @staticmethod
     def _bits(resp: bytes, count: int) -> list[bool]:
         data = resp[2:2 + resp[1]]
