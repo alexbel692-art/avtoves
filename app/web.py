@@ -24,6 +24,15 @@ from .plates import normalize, pretty
 STATIC = Path(__file__).parent / "static"
 
 
+class NoCacheStatic(StaticFiles):
+    """Файлы интерфейса всегда перепроверяются у сервера (иначе окно программы показывает старую версию)."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 def build_app(ctx) -> Starlette:
     """ctx: Runtime — поля cfg, scale, io, cameras, tracker, anpr, ctrl, db, sim (меняются при применении настроек)."""
     cfg, db = ctx.cfg, ctx.db
@@ -59,8 +68,14 @@ def build_app(ctx) -> Starlette:
             last["gas"] = gas_info(fresh) if gas_cfg()["enabled"] else None
         return c
 
+    # Страница и её файлы не кэшируются: после обновления программы окно сразу получает новую версию
+    NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
+    page = (STATIC / "index.html").read_text(encoding="utf-8")
+    page = page.replace('/static/style.css"', f'/static/style.css?v={__version__}"') \
+               .replace('/static/app.js"', f'/static/app.js?v={__version__}"')
+
     async def index(_):
-        return FileResponse(STATIC / "index.html")
+        return HTMLResponse(page, headers=NO_CACHE)
 
     async def state(_):
         return JSONResponse({
@@ -408,5 +423,5 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         Route("/api/settings/test/{kind}", settings_test, methods=["POST"]),
         Route("/api/settings/restart", settings_restart, methods=["POST"]),
         Mount("/snapshots", StaticFiles(directory=str(snap_dir)), name="snapshots"),
-        Mount("/static", StaticFiles(directory=str(STATIC)), name="static"),
+        Mount("/static", NoCacheStatic(directory=str(STATIC)), name="static"),
     ])
