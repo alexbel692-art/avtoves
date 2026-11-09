@@ -25,7 +25,14 @@
   input, select { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 14px; font-size: 18px; }
   button { border: 0; border-radius: 12px; padding: 16px; font-size: 18px; font-weight: 600; width: 100%; cursor: pointer; }
   button:disabled { opacity: .5; }
-  .pin { text-align: center; font-size: 30px; letter-spacing: .4em; font-family: ui-monospace, monospace; }
+  .pin-dots { display: flex; justify-content: center; gap: 14px; height: 54px; align-items: center; margin-bottom: 6px; }
+  .pin-dots i { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--muted); display: block; }
+  .pin-dots i.on { background: var(--accent); border-color: var(--accent); }
+  .pin-dots .hint { color: var(--muted); font-size: 15px; }
+  .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 8px; user-select: none; }
+  .keypad button { background: var(--bg); border: 1px solid var(--line); color: var(--text); font-size: 26px; padding: 14px 0; font-weight: 500; }
+  .keypad button:active { background: var(--line); }
+  .keypad .k-ok { background: var(--accent); color: #111; border-color: var(--accent); font-size: 18px; font-weight: 700; }
   .primary { background: var(--accent); color: #111; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
   .lcd { background: radial-gradient(120% 140% at 50% 0%, #1b2420, #0a0f0c); border-radius: 12px; padding: 12px 14px; margin-top: 8px;
@@ -61,9 +68,16 @@
   <h1>АвтоВес</h1>
   <div class="muted">Вход водителя</div>
   <div class="card">
-    <input id="pin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="PIN" autocomplete="one-time-code">
+    <!-- PIN без поля «пароль»: браузеры (Яндекс и др.) не вмешиваются со своими менеджерами паролей -->
+    <div class="pin-dots" id="pinDots"></div>
+    <div class="keypad" id="keypad">
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="del" aria-label="стереть">⌫</button><button data-k="0">0</button><button data-k="ok" class="k-ok" id="loginBtn">Войти</button>
+    </div>
     <div class="err" id="loginErr"></div>
-    <button class="primary" id="loginBtn">Войти</button>
+    <div class="muted" style="text-align:center">На компьютере PIN можно набрать и на клавиатуре, Enter — войти.</div>
   </div>
   <p class="muted">PIN-код выдаёт весовщик. Чтобы не искать страницу каждый раз, добавьте её на экран телефона:
     в браузере «Поделиться» / «⋮» → «На экран „Домой“».</p>
@@ -135,20 +149,42 @@ async function call(url, body) {
 function showLogin() {
   token = null; store.set("avtoves.driver", null);
   $("#main").hidden = true; $("#login").hidden = false;
-  setTimeout(() => $("#pin").focus(), 50);
+  setPin("");
 }
 
 $("#loginBtn").onclick = async () => {
   $("#loginErr").textContent = "";
+  if (pin.length < 4) { $("#loginErr").textContent = "PIN — от 4 до 8 цифр"; return; }
   const r = await fetch("/api/driver/login", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pin: $("#pin").value }) });
+    body: JSON.stringify({ pin }) });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { $("#loginErr").textContent = j.error || "ошибка"; return; }
+  if (!r.ok) { $("#loginErr").textContent = j.error || "ошибка"; setPin(""); return; }
   token = j.token; store.set("avtoves.driver", token);
-  $("#pin").value = ""; $("#login").hidden = true; $("#main").hidden = false;
+  setPin(""); $("#login").hidden = true; $("#main").hidden = false;
   plateBuilt = false; refresh();
 };
-$("#pin").onkeydown = e => e.key === "Enter" && $("#loginBtn").click();
+let pin = "";
+function setPin(v) {
+  pin = v.replace(/\D/g, "").slice(0, 8);
+  $("#pinDots").innerHTML = pin ? [...pin].map(() => `<i class="on"></i>`).join("") : `<span class="hint">введите PIN</span>`;
+}
+setPin("");
+function pinKey(k) {
+  $("#loginErr").textContent = "";
+  if (k === "ok") return $("#loginBtn").click();
+  if (k === "del") return setPin(pin.slice(0, -1));
+  setPin(pin + k);
+}
+document.querySelectorAll("#keypad [data-k]").forEach(b => { if (b.dataset.k !== "ok") b.onclick = () => pinKey(b.dataset.k); });
+document.addEventListener("keydown", e => {
+  if ($("#login").hidden || e.ctrlKey || e.altKey || e.metaKey) return;
+  const m = /^(?:Digit|Numpad)(\d)$/.exec(e.code || "");            // цифры при любой раскладке
+  const d = m ? m[1] : /^\d$/.test(e.key) ? e.key : null;
+  if (d !== null) { e.preventDefault(); pinKey(d); }
+  else if (e.key === "Backspace") { e.preventDefault(); pinKey("del"); }
+  else if (e.key === "Enter" || e.code === "NumpadEnter") { e.preventDefault(); pinKey("ok"); }
+  else if (e.key === "Escape") setPin("");
+});
 $("#logout").onclick = () => confirm("Выйти?") && showLogin();
 
 function currentPlate() {
