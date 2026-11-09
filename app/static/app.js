@@ -197,7 +197,11 @@ document.addEventListener("click", async e => {
   for (const k of ["plate", "cargo", "counterparty", "driver", "comment", "status"]) f.elements[k].value = t[k] ?? "";
   $("#dlgClose1").hidden = t.status !== "open";
   const ws = await api(`/api/trips/${t.id}/weighings`);
-  $("#dlgWeighings").innerHTML = ws.map(w => `<div><span>${dt(w.ts)} — <b>${kg(w.weight)} кг</b></span>` +
+  const kindTxt = { arrival: "приезд", departure: "убытие" };
+  $("#dlgWeighings").innerHTML = ws.map(w => `<div><span>${dt(w.ts)} — <b>${kg(w.weight)} кг</b>` +
+    (kindTxt[w.kind] ? ` · ${kindTxt[w.kind]}` : "") +
+    (w.source === "driver" ? ` · <span class="src-driver">📱 ${esc(w.operator)}</span>` : "") +
+    (w.plate_seen && w.plate_seen !== w.plate ? ` · камера: ${esc(pretty(w.plate_seen))}` : "") + `</span>` +
     (GAS.enabled && w.plate ? `<button type="button" data-tare="${w.id}" title="Записать этот вес как тару пустой машины в справочник ТС">Пустая — запомнить тару</button>` : "") +
     `</div>`).join("");
   $$("[data-tare]").forEach(b => b.onclick = async () => {
@@ -467,3 +471,61 @@ const SettingsUI = (() => {
 
 $$("nav button[data-tab=settings]").forEach(b => b.addEventListener("click", () => SettingsUI.open()));
 if (location.hash === "#settings") $("nav button[data-tab=settings]").click();
+
+// ================================================================ ВОДИТЕЛИ
+const DriversUI = (() => {
+  const form = $("#dForm");
+  const stoken = () => { try { return sessionStorage.getItem("avtoves.settings") } catch (e) { return null } };
+  const dapi = async (url, body, method) => {
+    const h = { "Content-Type": "application/json" };
+    const t = stoken(); if (t) h["X-Settings-Token"] = t;
+    const r = await fetch(url, { method: method || (body ? "POST" : "GET"), headers: h, body: body ? JSON.stringify(body) : undefined });
+    const j = await r.json().catch(() => ({}));
+    j._status = r.status;
+    return j;
+  };
+  let list = [];
+
+  async function open() {
+    const link = await dapi("/api/driver-link");
+    const url = (link.urls || [])[0] || "";
+    $("#drvUrl").textContent = url || "—";
+    $("#drvMode").textContent = link.driver_mode ? "Режим «водители взвешиваются сами» включён."
+      : "Чтобы кнопки водителей работали, включите «Настройки → Проезд → водители взвешиваются сами с телефона».";
+    $("#drvQr").hidden = !(link.qr && url);
+    if (link.qr && url) $("#drvQr").src = "/api/driver-qr.svg?u=" + encodeURIComponent(url);
+    const r = await dapi("/api/drivers");
+    if (r._status === 401) { $("#drvLogin").hidden = false; form.hidden = true; $("#dTable tbody").innerHTML = ""; return; }
+    $("#drvLogin").hidden = true; form.hidden = false;
+    list = Array.isArray(r) ? r : Object.values(r).filter(x => x && x.id);
+    $("#dTable tbody").innerHTML = list.map(d => `
+      <tr><td><b>${esc(d.name)}</b></td><td>${esc(d.phone)}</td><td>${esc(pretty(d.plate))}</td>
+      <td>${d.active ? "да" : "нет"}</td><td>${dt(d.last_login)}</td><td>${esc(d.comment)}</td>
+      <td><button data-dedit="${d.id}">Изменить</button> <button data-ddel="${d.id}">Удалить</button></td></tr>`).join("");
+    $$("[data-dedit]").forEach(b => b.onclick = () => {
+      const d = list.find(x => x.id == b.dataset.dedit);
+      for (const k of ["id", "name", "phone", "plate", "comment"]) form.elements[k].value = d[k] ?? "";
+      form.elements.pin.value = ""; form.elements.pin.placeholder = "PIN — не менять";
+      form.elements.active.checked = !!d.active;
+      form.elements.name.focus();
+    });
+    $$("[data-ddel]").forEach(b => b.onclick = async () => {
+      const d = list.find(x => x.id == b.dataset.ddel);
+      if (!confirm(`Удалить водителя ${d.name}? Его взвешивания в журнале останутся.`)) return;
+      await dapi("/api/drivers/" + d.id, {}, "DELETE"); open();
+    });
+  }
+  function reset() { form.reset(); form.elements.id.value = ""; form.elements.pin.placeholder = "PIN (4–8 цифр)"; form.elements.active.checked = true; $("#dErr").textContent = ""; }
+  $("#dNew").onclick = reset;
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const v = Object.fromEntries(new FormData(form));
+    v.active = form.elements.active.checked;
+    v.id = v.id ? +v.id : null;
+    const r = await dapi("/api/drivers", v);
+    if (!r.ok) { $("#dErr").textContent = r.error || "ошибка"; return; }
+    reset(); open();
+  };
+  return { open };
+})();
+$$("nav button[data-tab=drivers]").forEach(b => b.addEventListener("click", () => DriversUI.open()));

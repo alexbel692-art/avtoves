@@ -122,7 +122,8 @@ def to_form(raw: dict) -> dict:
             "ir_active_level": io.get("ir_active_level", 1),
             "barrier_pulse_sec": io.get("barrier_pulse_sec", 1.0),
         },
-        "weighing": {k: w.get(k) for k in ("mode", "auto_fix", "clear_time", "trip_max_hours", "plate_window_sec")},
+        "weighing": {k: w.get(k) for k in ("mode", "auto_fix", "driver_mode", "clear_time", "trip_max_hours",
+                                           "plate_window_sec")},
         "anpr": {"min_confidence": an.get("min_confidence"), "interval_ms": an.get("interval_ms")},
         "gas": {k: c["gas"].get(k) for k in ("enabled", "name", "density", "show_liters")},
         "cameras": [{"id": cam.get("id", f"cam{i + 1}"), "name": cam.get("name", ""), "side": cam.get("side"),
@@ -239,6 +240,7 @@ def apply_form(raw: dict, f: dict) -> dict:
     w = f.get("weighing", {})
     out["weighing"]["mode"] = "reverse" if w.get("mode") == "reverse" else "through"
     out["weighing"]["auto_fix"] = bool(w.get("auto_fix"))
+    out["weighing"]["driver_mode"] = bool(w.get("driver_mode"))
     out["weighing"]["clear_time"] = _num(w.get("clear_time"), "weighing.clear_time", e, 0.5, 60)
     out["weighing"]["trip_max_hours"] = _num(w.get("trip_max_hours"), "weighing.trip_max_hours", e, 1, 720, int)
     out["weighing"]["plate_window_sec"] = _num(w.get("plate_window_sec"), "weighing.plate_window_sec", e, 5, 600, int)

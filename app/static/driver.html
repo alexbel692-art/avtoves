@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#121417">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="АвтоВес">
+<link rel="icon" href="/static/favicon.ico">
+<link rel="apple-touch-icon" href="/static/driver-icon.png">
+<title>АвтоВес — водитель</title>
+<style>
+  :root { --bg:#121417; --panel:#1b1f24; --line:#2e343d; --text:#e6e8eb; --muted:#8a929e; --accent:#f2a900; --ok:#2fbf71; --bad:#e5484d; --blue:#4ea1ff; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); max-width: 520px; margin: 0 auto; }
+  [hidden] { display: none !important; }
+  h1 { font-size: 20px; color: var(--accent); margin: 0 0 4px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-top: 14px; }
+  input, select, button { font: inherit; color: inherit; }
+  input, select { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 14px; font-size: 18px; }
+  button { border: 0; border-radius: 12px; padding: 16px; font-size: 18px; font-weight: 600; width: 100%; cursor: pointer; }
+  button:disabled { opacity: .5; }
+  .pin { text-align: center; font-size: 30px; letter-spacing: .4em; font-family: ui-monospace, monospace; }
+  .primary { background: var(--accent); color: #111; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .weight { font-family: ui-monospace, Consolas, monospace; font-size: 48px; font-weight: 700; color: #ff4b3e; text-align: right; line-height: 1; }
+  .weight.stable { color: #6dff9e; }
+  .state { margin-top: 8px; font-weight: 600; }
+  .warn { color: var(--bad); font-size: 14px; margin-top: 4px; }
+  .btns { display: grid; gap: 12px; margin-top: 14px; }
+  .arrive { background: var(--blue); color: #fff; padding: 22px; font-size: 20px; }
+  .leave { background: var(--ok); color: #0b0c0e; padding: 22px; font-size: 20px; }
+  .result { border-left: 4px solid var(--ok); }
+  .result.bad { border-left-color: var(--bad); }
+  .result .big { font-size: 30px; font-weight: 700; font-family: ui-monospace, monospace; }
+  .result img, .item img { width: 100%; border-radius: 10px; margin-top: 10px; display: block; }
+  .item { border-top: 1px solid var(--line); padding: 10px 0; }
+  .item:first-child { border-top: 0; }
+  .tag { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 10px; background: var(--line); margin-right: 6px; }
+  .tag.a { background: var(--blue); color: #fff; } .tag.d { background: var(--ok); color: #111; }
+  .link { background: none; color: var(--muted); font-size: 14px; padding: 8px; width: auto; font-weight: 400; text-decoration: underline; }
+  .err { color: var(--bad); margin-top: 10px; min-height: 20px; }
+  .spinner { width: 22px; height: 22px; border: 3px solid rgba(0,0,0,.25); border-top-color: currentColor; border-radius: 50%; display: inline-block; vertical-align: -5px; margin-right: 8px; animation: r 1s linear infinite; }
+  @keyframes r { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<!-- вход -->
+<section id="login" hidden>
+  <h1>АвтоВес</h1>
+  <div class="muted">Вход водителя</div>
+  <div class="card">
+    <input id="pin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="PIN" autocomplete="one-time-code">
+    <div class="err" id="loginErr"></div>
+    <button class="primary" id="loginBtn">Войти</button>
+  </div>
+  <p class="muted">PIN-код выдаёт весовщик. Чтобы не искать страницу каждый раз, добавьте её на экран телефона:
+    в браузере «Поделиться» / «⋮» → «На экран „Домой“».</p>
+</section>
+
+<!-- работа -->
+<section id="main" hidden>
+  <div class="row">
+    <div><h1>АвтоВес</h1><div class="muted" id="who"></div></div>
+    <button class="link" id="logout">Выйти</button>
+  </div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:6px">Моя машина</div>
+    <select id="plate"></select>
+    <input id="plateOther" placeholder="Номер, например А123ВС77" hidden style="margin-top:8px;text-transform:uppercase">
+  </div>
+
+  <div class="card">
+    <div class="row"><span class="muted">На весах</span><span class="muted" id="seen"></span></div>
+    <div class="weight" id="weight">—</div>
+    <div class="state" id="state"></div>
+    <div class="warn" id="warn"></div>
+  </div>
+
+  <div class="btns">
+    <button class="arrive" data-dir="arrival">Приехал на базу — взвесить</button>
+    <button class="leave" data-dir="departure">Уехал с базы — взвесить</button>
+  </div>
+
+  <div class="card result" id="result" hidden></div>
+
+  <div class="card">
+    <div class="muted">Мои взвешивания сегодня</div>
+    <div id="today"></div>
+  </div>
+</section>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const kg = v => v === null || v === undefined ? "—" : Math.round(v).toLocaleString("ru-RU");
+const pretty = p => { const m = /^(\D)(\d{3})(\D{2})(\d{2,3})$/.exec(p || ""); return m ? m.slice(1).join(" ") : (p || ""); };
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} },
+};
+let token = store.get("avtoves.driver");
+let busy = false, plateBuilt = false;
+
+async function call(url, body) {
+  const r = await fetch(url, {
+    method: body ? "POST" : "GET",
+    headers: { "Content-Type": "application/json", "X-Driver-Token": token || "" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401) { showLogin(); throw new Error("login"); }
+  j._status = r.status;
+  return j;
+}
+
+function showLogin() {
+  token = null; store.set("avtoves.driver", null);
+  $("#main").hidden = true; $("#login").hidden = false;
+  setTimeout(() => $("#pin").focus(), 50);
+}
+
+$("#loginBtn").onclick = async () => {
+  $("#loginErr").textContent = "";
+  const r = await fetch("/api/driver/login", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pin: $("#pin").value }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { $("#loginErr").textContent = j.error || "ошибка"; return; }
+  token = j.token; store.set("avtoves.driver", token);
+  $("#pin").value = ""; $("#login").hidden = true; $("#main").hidden = false;
+  plateBuilt = false; refresh();
+};
+$("#pin").onkeydown = e => e.key === "Enter" && $("#loginBtn").click();
+$("#logout").onclick = () => confirm("Выйти?") && showLogin();
+
+function currentPlate() {
+  return $("#plate").value === "__other" ? $("#plateOther").value.trim().toUpperCase() : $("#plate").value;
+}
+$("#plate").onchange = () => {
+  $("#plateOther").hidden = $("#plate").value !== "__other";
+  store.set("avtoves.plate", $("#plate").value === "__other" ? $("#plateOther").value : $("#plate").value);
+};
+$("#plateOther").oninput = () => store.set("avtoves.plate", $("#plateOther").value.toUpperCase());
+
+function buildPlates(d) {
+  const saved = store.get("avtoves.plate") || d.driver.plate || "";
+  const list = d.plates.slice();
+  $("#plate").innerHTML = `<option value="">— выберите номер —</option>` +
+    list.map(p => `<option value="${esc(p)}">${esc(pretty(p))}</option>`).join("") +
+    `<option value="__other">другой номер…</option>`;
+  if (saved && list.includes(saved)) $("#plate").value = saved;
+  else if (saved) { $("#plate").value = "__other"; $("#plateOther").value = saved; $("#plateOther").hidden = false; }
+  plateBuilt = true;
+}
+
+function render(d) {
+  $("#who").textContent = d.driver.name;
+  if (!plateBuilt) buildPlates(d);
+  const w = $("#weight");
+  w.textContent = d.scale.connected ? kg(d.scale.weight) + " кг" : "нет связи";
+  w.classList.toggle("stable", !!d.scale.stable);
+  $("#state").textContent = d.state_text;
+  $("#warn").textContent = d.warning || "";
+  $("#seen").textContent = d.seen_plate ? "камера: " + pretty(d.seen_plate) : "";
+  $("#today").innerHTML = d.today.length ? d.today.map(t => `
+    <div class="item">
+      <div class="row"><span><span class="tag ${t.kind === "arrival" ? "a" : t.kind === "departure" ? "d" : ""}">
+        ${t.kind === "arrival" ? "приезд" : t.kind === "departure" ? "убытие" : "взвешивание"}</span>
+        ${esc(t.ts.slice(11, 16))} · ${esc(pretty(t.plate))}</span><b>${kg(t.weight)} кг</b></div>
+      ${t.net !== null && t.kind === "departure" ? `<div class="muted">нетто ${kg(t.net)} кг</div>` : ""}
+    </div>`).join("") : `<div class="muted" style="margin-top:6px">пока нет</div>`;
+}
+
+async function refresh() {
+  if (!token) return showLogin();
+  try { render(await call("/api/driver/me")); } catch (e) { /* нет сети — попробуем снова */ }
+}
+
+document.querySelectorAll("[data-dir]").forEach(b => b.onclick = async () => {
+  if (busy) return;
+  const plate = currentPlate();
+  const res = $("#result");
+  if (!plate) { res.hidden = false; res.className = "card result bad"; res.textContent = "Выберите номер вашей машины."; return; }
+  busy = true;
+  const label = b.textContent;
+  document.querySelectorAll("[data-dir]").forEach(x => x.disabled = true);
+  b.innerHTML = `<span class="spinner"></span>Взвешиваю… стойте на весах`;
+  res.hidden = true;
+  try {
+    const r = await call("/api/driver/weigh", { plate, direction: b.dataset.dir });
+    res.hidden = false;
+    if (!r.ok) {
+      res.className = "card result bad";
+      res.innerHTML = `<b>Не записано</b><div>${esc(r.error || "ошибка")}</div>`;
+    } else {
+      res.className = "card result";
+      const g = r.gas;
+      res.innerHTML = `
+        <div class="muted">${r.direction === "arrival" ? "Приезд записан" : "Убытие записано"} · ${esc(r.ts.replace("T", " ").slice(0, 16))}</div>
+        <div class="big">${kg(r.weight)} кг</div>
+        <div>${esc(pretty(r.plate))} · рейс №${r.trip.id}</div>
+        ${r.trip.status === "closed" ? `<div>Нетто: <b>${kg(r.trip.net)} кг</b></div>` : ""}
+        ${g ? `<div class="muted">Газ: ${g.out_kg !== null ? `${g.action} ${kg(Math.abs(g.delta_kg))} кг` : `в машине ${kg(g.in_kg)} кг`}</div>` : ""}
+        ${r.photo ? `<img src="${esc(r.photo)}" alt="фото машины">` : ""}
+        <div class="muted" style="margin-top:8px">Можно съезжать с весов, когда загорится зелёный.</div>`;
+      if (navigator.vibrate) navigator.vibrate(200);
+    }
+  } catch (e) {
+    if (e.message !== "login") { res.hidden = false; res.className = "card result bad"; res.textContent = "Нет связи с весовой. Проверьте Wi-Fi."; }
+  } finally {
+    busy = false;
+    b.textContent = label;
+    document.querySelectorAll("[data-dir]").forEach(x => x.disabled = false);
+    refresh();
+  }
+});
+
+refresh();
+setInterval(() => { if (!busy && token && !document.hidden) refresh(); }, 1500);
+</script>
+</body>
+</html>

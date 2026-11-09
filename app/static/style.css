@@ -152,3 +152,9 @@ td.gas-out { color: var(--ok); } td.gas-in { color: #4ea1ff; }
 .dlg-w { margin-top: 10px; font-size: 13px; }
 .dlg-w div { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
 .dlg-w button { font-size: 12px; padding: 3px 8px; }
+
+/* ---------- водители */
+.drv-link { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+.drv-url { font-family: var(--mono); font-size: 20px; color: var(--accent); margin: 4px 0 8px; user-select: all; }
+#drvQr { width: 150px; height: 150px; background: #fff; padding: 8px; border-radius: 8px; flex: none; }
+.src-driver { color: #4ea1ff; }

@@ -25,7 +25,7 @@ DEFAULTS = {
         "barrier_pulse_sec": 1.0, "ir_active_level": 1,
     },
     "weighing": {
-        "mode": "through", "auto_fix": True, "clear_time": 3.0,
+        "mode": "through", "auto_fix": True, "driver_mode": False, "clear_time": 3.0,
         "trip_max_hours": 24, "plate_window_sec": 60,
     },
     # газовозы: газ в машине = вес − тара пустой машины; литры = кг / плотность

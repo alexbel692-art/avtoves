@@ -16,6 +16,10 @@ from .scale import Scale
 log = logging.getLogger("weighing")
 
 FREE, ARRIVING, FIXED = "free", "arriving", "fixed"
+
+
+class DriverError(Exception):
+    """Причина, по которой вес по кнопке водителя не записан (текст — для водителя)."""
 STATE_TEXT = {
     FREE: "Весы свободны — проезд разрешён",
     ARRIVING: "Машина на весах — ожидание стабилизации",
@@ -114,11 +118,13 @@ class WeighingController:
                 if self.io.ir_blocked():
                     self.warning = "Машина стоит не полностью на платформе (ИК-барьер)"
                     return
-                if self._fix_request or (self.wcfg["auto_fix"] and s["stable"] and occupied):
+                # режим «водители с телефона»: вес записывается только по кнопке водителя (или оператора)
+                auto = self.wcfg["auto_fix"] and not self.wcfg.get("driver_mode")
+                if self._fix_request or (auto and s["stable"] and occupied):
                     if not s["stable"] and not self._fix_request:
                         return
                     self._fix_request = False
-                    self._fix(w, auto=self.wcfg["auto_fix"] and s["stable"])
+                    self._fix(w, auto=auto and s["stable"], source="operator" if not auto else "auto")
 
             elif self.state == FIXED:
                 if empty and self._empty_for(now):
@@ -149,15 +155,19 @@ class WeighingController:
         return self.tracker.best(since, arrive_ts=self.arrive_ts, ignore=ignore,
                                  seen_after=self.free_since - 1)
 
-    def _fix(self, weight: float, auto: bool):
+    def _fix(self, weight: float, auto: bool, *, source: str = "", direction: str = "",
+             driver: dict | None = None, plate_seen: str = ""):
         cand = self.current_plate() or {}
         plate = cand.get("plate", "")
         snaps = self._save_snapshots(cand.get("crop"))
         res = self.db.add_weighing(plate, cand.get("conf"), weight, self.side_in or cand.get("side"),
-                                   auto, ";".join(snaps), int(self.wcfg["trip_max_hours"]))
+                                   auto, ";".join(snaps), int(self.wcfg["trip_max_hours"]),
+                                   kind=direction, source=source, driver=driver, plate_seen=plate_seen)
         trip = res["trip"]
         kind = "второе" if trip["status"] == "closed" else "первое"
-        msg = f"Зафиксировано {weight:.0f} кг, номер {plate or 'НЕ РАСПОЗНАН'} ({kind} взвешивание)"
+        who = f" — водитель {driver['name']}" if driver else ""
+        what = {"arrival": "приезд", "departure": "убытие"}.get(direction, f"{kind} взвешивание")
+        msg = f"Зафиксировано {weight:.0f} кг, номер {plate or 'НЕ РАСПОЗНАН'} ({what}){who}"
         if trip["status"] == "closed":
             msg += f", нетто {trip['net']:.0f} кг"
         self.event(msg)
@@ -170,6 +180,40 @@ class WeighingController:
                             "kind": kind, "ts": datetime.now().isoformat(timespec="seconds")}
         self._set_state(FIXED)
         self._lights_exit()
+
+    # ------------------------------------------------------------ кнопка водителя
+    def fix_by_driver(self, driver: dict, plate: str, direction: str, wait_sec: float = 25) -> dict:
+        """Водитель нажал «Приехал»/«Уехал». Ждём, пока машина встанет и вес успокоится,
+        проверяем номер камерой и записываем. Возвращает результат или бросает DriverError."""
+        deadline = time.time() + wait_sec
+        why = "на весах нет машины"
+        while time.time() < deadline:
+            s = self.scale.snapshot()
+            with self._lock:
+                if not s["connected"]:
+                    raise DriverError("нет связи с весами — обратитесь к весовщику")
+                if self.state == FIXED:
+                    raise DriverError("вес этой машины уже записан — съезжайте с весов")
+                w = s["weight"] or 0.0
+                if self.state == ARRIVING and w >= self.scfg["min_weight"]:
+                    if self.io.ir_blocked():
+                        why = "машина стоит не полностью на платформе — подъедьте"
+                    elif not s["stable"]:
+                        why = "вес не успокоился — стойте ровно, не выходите из кабины"
+                    else:
+                        cand = self.tracker.best(self.arrive_ts - float(self.wcfg["plate_window_sec"]),
+                                                 arrive_ts=self.arrive_ts) or {}
+                        seen = cand.get("plate", "")
+                        if seen and cand.get("valid") and cand.get("conf", 0) >= 0.7 and seen != plate:
+                            self.event(f"Водитель {driver['name']}: выбран {plate}, а камера видит {seen} — отказ")
+                            raise DriverError(f"камера видит на весах другой номер: {seen}. "
+                                              f"Проверьте, что выбрана ваша машина ({plate})")
+                        self.plate_override = plate
+                        self._fix(w, auto=False, source="driver", direction=direction, driver=driver,
+                                  plate_seen=seen)
+                        return dict(self.last_result)
+            time.sleep(0.3)
+        raise DriverError(why)
 
     def _save_snapshots(self, crop: bytes | None) -> list[str]:
         day = datetime.now().strftime("%Y-%m-%d")
@@ -238,7 +282,8 @@ class WeighingController:
             "state": self.state, "state_text": STATE_TEXT[self.state],
             "state_for": round(time.time() - self.state_since),
             "warning": self.warning, "side_in": self.side_in,
-            "auto_fix": self.wcfg["auto_fix"], "mode": self.wcfg["mode"],
+            "auto_fix": self.wcfg["auto_fix"] and not self.wcfg.get("driver_mode"),
+            "driver_mode": bool(self.wcfg.get("driver_mode")), "mode": self.wcfg["mode"],
             "plate": {k: v for k, v in (cand or {}).items() if k != "crop"} if cand else None,
             "plate_override": self.plate_override,
             "last": {k: v for k, v in (self.last_result or {}).items()} if self.last_result else None,

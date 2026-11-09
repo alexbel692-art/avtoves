@@ -6,6 +6,8 @@ import html
 import io
 import logging
 import os
+import re
+import socket
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +20,9 @@ from starlette.staticfiles import StaticFiles
 
 from . import __version__
 from . import settings as st
+from .drivers import DriverAuth
+from .plates import normalize as norm_plate
+from .weighing import DriverError
 from .io_control import LIGHT_GREEN, LIGHT_OFF, LIGHT_RED
 from .plates import normalize, pretty
 
@@ -422,6 +427,153 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         asyncio.get_running_loop().call_later(1.0, os._exit, 3)
         return JSONResponse({"ok": True})
 
+    # ---------------------------------------------------------- водители: справочник (оператор)
+    dauth = DriverAuth(cfg["data_dir"])
+
+    async def drivers_list(request: Request):
+        if not _settings_ok(request):
+            return _deny()
+        return JSONResponse(db.drivers())
+
+    async def driver_save(request: Request):
+        if not _settings_ok(request):
+            return _deny()
+        d = await request.json()
+        d["name"] = str(d.get("name", "")).strip()
+        if not d["name"]:
+            return JSONResponse({"error": "укажите ФИО водителя"}, 400)
+        d["plate"] = norm_plate(d.get("plate", ""))[0] if d.get("plate") else ""
+        pin = str(d.get("pin", "")).strip()
+        if pin and not dauth.valid_pin(pin):
+            return JSONResponse({"error": "PIN — от 4 до 8 цифр"}, 400)
+        if not d.get("id") and not pin:
+            return JSONResponse({"error": "задайте PIN новому водителю"}, 400)
+        h = dauth.pin_hash(pin) if pin else None
+        if h:
+            other = db.driver_by_pin_hash(h)
+            if other and other["id"] != d.get("id"):
+                return JSONResponse({"error": "такой PIN уже у другого водителя — придумайте другой"}, 400)
+        did = db.save_driver(d, h)
+        return JSONResponse({"ok": True, "id": did})
+
+    async def driver_delete(request: Request):
+        if not _settings_ok(request):
+            return _deny()
+        db.delete_driver(int(request.path_params["did"]))
+        return JSONResponse({"ok": True})
+
+    # ---------------------------------------------------------- водители: страница для телефона
+    def _driver(request: Request) -> dict | None:
+        did = dauth.check(request.headers.get("x-driver-token"))
+        d = db.driver(did) if did else None
+        return d if d and d["active"] else None
+
+    def lan_ips() -> list[str]:
+        ips = []
+        try:      # основной адрес компьютера в сети (пакет никуда не отправляется)
+            u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            u.connect(("10.255.255.255", 1))
+            ips.append(u.getsockname()[0])
+            u.close()
+        except OSError:
+            pass
+        try:
+            ips += [a for a in socket.gethostbyname_ex(socket.gethostname())[2] if a not in ips]
+        except OSError:
+            pass
+        return [a for a in ips if not a.startswith("127.")] or ["127.0.0.1"]
+
+    async def driver_link(_):
+        port = ctx.cfg["server"]["port"]
+        urls = [f"http://{ip}:{port}/driver" for ip in lan_ips()]
+        try:
+            import qrcode  # noqa: F401
+            qr = True
+        except ImportError:
+            qr = False
+        return JSONResponse({"urls": urls, "qr": qr, "driver_mode": bool(ctx.cfg["weighing"].get("driver_mode"))})
+
+    async def driver_qr(request: Request):
+        import qrcode
+        import qrcode.image.svg
+        url = request.query_params.get("u", "")
+        if not re.fullmatch(r"http://[0-9A-Za-z.\-]+:\d+/driver", url):
+            return Response(status_code=400)
+        img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=2)
+        buf = io.BytesIO()
+        img.save(buf)
+        return Response(buf.getvalue(), media_type="image/svg+xml")
+
+    async def driver_page(_):
+        return FileResponse(STATIC / "driver.html", headers=NO_CACHE)
+
+    async def driver_login(request: Request):
+        ip = request.client.host if request.client else "?"
+        if dauth.blocked(ip):
+            return JSONResponse({"error": "слишком много неверных попыток — подождите 5 минут"}, 429)
+        pin = str((await request.json()).get("pin", "")).strip()
+        d = db.driver_by_pin_hash(dauth.pin_hash(pin)) if dauth.valid_pin(pin) else None
+        if not d or not d["active"]:
+            dauth.failed(ip)
+            await asyncio.sleep(1.0)
+            return JSONResponse({"error": "неверный PIN"}, 403)
+        dauth.ok(ip)
+        db.driver_login(d["id"])
+        ctx.ctrl.event(f"Водитель {d['name']} вошёл с телефона")
+        return JSONResponse({"token": dauth.token(d["id"]), "driver": d})
+
+    async def driver_me(request: Request):
+        d = _driver(request)
+        if not d:
+            return JSONResponse({"error": "войдите по PIN", "need_login": True}, 401)
+        sc, c = ctx.scale.snapshot(), ctx.ctrl.snapshot()
+        today = datetime.now().strftime("%Y-%m-%dT00:00:00")
+        mine = db.driver_weighings(d["id"], today)
+        plates = sorted({v["plate"] for v in db.vehicles()} | ({d["plate"]} if d["plate"] else set()))
+        cand = c.get("plate") or {}
+        return JSONResponse({
+            "driver": d, "plates": plates,
+            "scale": {"connected": sc["connected"], "weight": sc["weight"], "stable": sc["stable"]},
+            "state": c["state"], "state_text": c["state_text"], "warning": c["warning"],
+            "seen_plate": cand.get("plate") if cand.get("camera") != "оператор" else None,
+            "driver_mode": c.get("driver_mode"),
+            "today": [{"id": w["id"], "ts": w["ts"], "plate": w["plate"], "weight": w["weight"], "kind": w["kind"],
+                       "trip_id": w["trip_id"], "net": w["net"], "photo": _photo(w["snapshots"])} for w in mine],
+        })
+
+    def _photo(snaps: str) -> str | None:
+        files = [x for x in (snaps or "").split(";") if x]
+        cam = [x for x in files if not x.endswith("_plate.jpg")]
+        pick = (cam or files or [None])[0]
+        return f"/snapshots/{pick}" if pick else None
+
+    async def driver_weigh(request: Request):
+        d = _driver(request)
+        if not d:
+            return JSONResponse({"error": "войдите по PIN", "need_login": True}, 401)
+        b = await request.json()
+        plate, _ = norm_plate(str(b.get("plate", "")))
+        direction = b.get("direction")
+        if direction not in ("arrival", "departure"):
+            return JSONResponse({"error": "выберите: приехал или уехал"}, 400)
+        if len(plate) < 6:
+            return JSONResponse({"error": "выберите номер вашей машины"}, 400)
+        veh = db.vehicle(plate)
+        if veh and veh.get("blocked"):
+            return JSONResponse({"error": "машина в стоп-листе — обратитесь к весовщику"}, 403)
+        loop = asyncio.get_running_loop()
+        try:
+            res = await loop.run_in_executor(None, ctx.ctrl.fix_by_driver, d, plate, direction)
+        except DriverError as ex:
+            return JSONResponse({"error": str(ex)}, 409)
+        t = db.trip(res["trip"]["id"])
+        return JSONResponse({
+            "ok": True, "weight": res["weight"], "ts": res["ts"], "plate": res["plate"], "direction": direction,
+            "trip": {"id": t["id"], "status": t["status"], "w1": t["w1"], "w2": t["w2"], "net": t["net"]},
+            "gas": gas_info(t) if gas_cfg()["enabled"] else None,
+            "photo": _photo(";".join(res.get("snapshots") or [])),
+        })
+
     snap_dir = Path(cfg["data_dir"]) / "snapshots"
     return Starlette(routes=[
         Route("/", index),
@@ -446,6 +598,15 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         Route("/api/1c/trips", api_1c_trips),
         Route("/api/1c/ack", api_1c_ack, methods=["POST"]),
         Route("/api/sim/drive", sim_drive, methods=["POST"]),
+        Route("/driver", driver_page),
+        Route("/api/driver-link", driver_link),
+        Route("/api/driver-qr.svg", driver_qr),
+        Route("/api/driver/login", driver_login, methods=["POST"]),
+        Route("/api/driver/me", driver_me),
+        Route("/api/driver/weigh", driver_weigh, methods=["POST"]),
+        Route("/api/drivers", drivers_list),
+        Route("/api/drivers", driver_save, methods=["POST"]),
+        Route("/api/drivers/{did:int}", driver_delete, methods=["DELETE"]),
         Route("/api/settings/status", settings_status),
         Route("/api/settings/login", settings_login, methods=["POST"]),
         Route("/api/settings", settings_get),

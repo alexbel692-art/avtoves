@@ -1,4 +1,4 @@
-"""База данных SQLite: взвешивания, рейсы, справочник ТС."""
+"""База данных SQLite: взвешивания, рейсы, справочник ТС, водители."""
 from __future__ import annotations
 
 import sqlite3
@@ -51,12 +51,25 @@ CREATE TABLE IF NOT EXISTS vehicles (
     blocked      INTEGER NOT NULL DEFAULT 0,
     comment      TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS drivers (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    phone        TEXT NOT NULL DEFAULT '',
+    pin_hash     TEXT NOT NULL UNIQUE,      -- HMAC от PIN (сам PIN не хранится)
+    plate        TEXT NOT NULL DEFAULT '',  -- машина по умолчанию
+    active       INTEGER NOT NULL DEFAULT 1,
+    comment      TEXT NOT NULL DEFAULT '',
+    last_login   TEXT
+);
 """
 
 
 # Колонки, добавленные после первой версии (старые базы дополняются при запуске)
 MIGRATIONS = {
-    "trips": {"gas_tare": "REAL", "gas_in": "REAL", "gas_out": "REAL"},
+    "trips": {"gas_tare": "REAL", "gas_in": "REAL", "gas_out": "REAL", "driver_id": "INTEGER"},
+    # source: auto / operator / driver;  kind: arrival (приехал) / departure (уехал) / ''
+    "weighings": {"source": "TEXT NOT NULL DEFAULT ''", "kind": "TEXT NOT NULL DEFAULT ''",
+                  "driver_id": "INTEGER", "plate_seen": "TEXT NOT NULL DEFAULT ''"},
     "vehicles": {"tank_l": "REAL"},
 }
 
@@ -91,14 +104,20 @@ class DB:
 
     # ---------------------------------------------------------- взвешивание
     def add_weighing(self, plate: str, conf: float | None, weight: float, side_in: str | None,
-                     auto: bool, snapshots: str, trip_hours: int) -> dict:
-        """Сохраняет взвешивание и связывает его с рейсом (первое/второе взвешивание)."""
+                     auto: bool, snapshots: str, trip_hours: int, *, kind: str = "", source: str = "",
+                     driver: dict | None = None, plate_seen: str = "") -> dict:
+        """Сохраняет взвешивание и связывает его с рейсом.
+        kind='' — первое/второе определяется само (есть открытый рейс этой машины → закрываем);
+        kind='arrival' — «приехал на базу»: всегда новый рейс;
+        kind='departure' — «уехал с базы»: закрываем открытый рейс машины."""
         ts = now_iso()
         wid = self.x(
-            "INSERT INTO weighings(ts,plate,plate_conf,weight,side_in,auto,snapshots) VALUES(?,?,?,?,?,?,?)",
-            (ts, plate, conf, weight, side_in, int(auto), snapshots))
+            "INSERT INTO weighings(ts,plate,plate_conf,weight,side_in,auto,snapshots,source,kind,driver_id,"
+            "plate_seen,operator) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ts, plate, conf, weight, side_in, int(auto), snapshots, source, kind,
+             (driver or {}).get("id"), plate_seen, (driver or {}).get("name", "")))
         trip = None
-        if plate:
+        if plate and kind != "arrival":
             since = (datetime.now() - timedelta(hours=trip_hours)).isoformat(timespec="seconds")
             rows = self.q("SELECT * FROM trips WHERE plate=? AND status='open' AND w1_ts>=? "
                           "ORDER BY id DESC LIMIT 1", (plate, since))
@@ -113,10 +132,12 @@ class DB:
             tid = trip["id"]
         else:
             veh = self.vehicle(plate) if plate else None
-            tid = self.x("INSERT INTO trips(plate,w1_id,w1_ts,w1,counterparty,driver,updated) "
-                         "VALUES(?,?,?,?,?,?,?)",
+            drv_name = (driver or {}).get("name") or (veh or {}).get("driver", "")
+            comment = "убытие без отметки приезда" if kind == "departure" else ""
+            tid = self.x("INSERT INTO trips(plate,w1_id,w1_ts,w1,counterparty,driver,driver_id,comment,updated) "
+                         "VALUES(?,?,?,?,?,?,?,?,?)",
                          (plate, wid, ts, weight, (veh or {}).get("counterparty", ""),
-                          (veh or {}).get("driver", ""), now_iso()))
+                          drv_name, (driver or {}).get("id"), comment, now_iso()))
         self.x("UPDATE weighings SET trip_id=? WHERE id=?", (tid, wid))
         self.recalc_gas(tid)
         return {"weighing_id": wid, "trip": self.trip(tid)}
@@ -240,6 +261,49 @@ class DB:
         if v["tare"] and (not old or not old.get("tare")):
             for t in self.q("SELECT id FROM trips WHERE plate=? AND gas_tare IS NULL", (v["plate"],)):
                 self.recalc_gas(t["id"])
+
+    # ---------------------------------------------------------- водители
+    def drivers(self) -> list[dict]:
+        rows = self.q("SELECT id,name,phone,plate,active,comment,last_login FROM drivers ORDER BY name")
+        return rows
+
+    def driver(self, did: int) -> dict | None:
+        r = self.q("SELECT id,name,phone,plate,active,comment,last_login FROM drivers WHERE id=?", (did,))
+        return r[0] if r else None
+
+    def driver_by_pin_hash(self, h: str) -> dict | None:
+        r = self.q("SELECT id,name,phone,plate,active,comment,last_login FROM drivers WHERE pin_hash=?", (h,))
+        return r[0] if r else None
+
+    def save_driver(self, d: dict, pin_hash: str | None) -> int:
+        f = {k: d.get(k, "") for k in ("name", "phone", "plate", "comment")}
+        f["active"] = 1 if d.get("active", True) else 0
+        if d.get("id"):
+            sets = ",".join(f"{k}=?" for k in f)
+            args = list(f.values())
+            if pin_hash:
+                sets += ",pin_hash=?"
+                args.append(pin_hash)
+            self.x(f"UPDATE drivers SET {sets} WHERE id=?", (*args, int(d["id"])))
+            return int(d["id"])
+        return self.x("INSERT INTO drivers(name,phone,plate,comment,active,pin_hash) VALUES(?,?,?,?,?,?)",
+                      (f["name"], f["phone"], f["plate"], f["comment"], f["active"], pin_hash))
+
+    def delete_driver(self, did: int):
+        self.x("DELETE FROM drivers WHERE id=?", (did,))
+
+    def driver_login(self, did: int):
+        self.x("UPDATE drivers SET last_login=? WHERE id=?", (now_iso(), did))
+
+    def driver_weighings(self, did: int, since: str) -> list[dict]:
+        return self.q("SELECT w.*, t.net, t.status AS trip_status FROM weighings w LEFT JOIN trips t ON t.id=w.trip_id "
+                      "WHERE w.driver_id=? AND w.ts>=? ORDER BY w.id DESC LIMIT 50", (did, since))
+
+    def open_trip(self, plate: str, trip_hours: int) -> dict | None:
+        since = (datetime.now() - timedelta(hours=trip_hours)).isoformat(timespec="seconds")
+        r = self.q("SELECT * FROM trips WHERE plate=? AND status='open' AND w1_ts>=? ORDER BY id DESC LIMIT 1",
+                   (plate, since))
+        return r[0] if r else None
 
     def delete_vehicle(self, plate: str):
         self.x("DELETE FROM vehicles WHERE plate=?", (plate,))
