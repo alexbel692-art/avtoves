@@ -365,6 +365,27 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         except asyncio.TimeoutError:
             return {"ok": False, "message": "нет ответа (таймаут)"}
 
+    async def live_scale_check(seconds: float = 4.0) -> dict:
+        sc = ctx.scale
+        start = sc.rx_bytes
+        await asyncio.sleep(seconds)
+        snap = sc.snapshot()
+        got = sc.rx_bytes - start
+        lines = snap.get("raw") or []
+        if not sc.link:
+            return {"ok": False, "message": f"нет подключения: {sc.error or 'программа не может подключиться к весам'}"}
+        if snap["connected"] and snap["weight"] is not None:
+            return {"ok": True, "message": f"вес {snap['weight']:.0f} кг" + (" (стабилен)" if snap["indicator_stable"] else "")
+                    + " — данные идут в программу", "lines": lines}
+        if snap["overload"]:
+            return {"ok": True, "message": "индикатор на связи, показывает перегруз", "lines": lines}
+        if got == 0:
+            return {"ok": False, "message": "подключение к NPort есть, но индикатор ничего не присылает "
+                                            "(включите непрерывную передачу на индикаторе, проверьте скорость "
+                                            "или поставьте нуль-модемный переходник)"}
+        return {"ok": False, "message": f"за {seconds:.0f} с пришло {got} байт, но формат не распознан — "
+                                        "попробуйте формат «другой»", "lines": lines}
+
     async def settings_test(request: Request):
         if not _settings_ok(request):
             return _deny()
@@ -372,6 +393,15 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         b = await request.json()
         try:
             if kind == "scale":
+                # Эти же весы уже читает программа — смотрим её подключение, а не открываем второе
+                # (NPort часто разрешает только одно подключение).
+                if b.get("type") == "serial":
+                    url = f"serial://{str(b.get('com', '')).strip().upper()}"
+                else:
+                    url = f"tcp://{str(b.get('host', '')).strip()}:{int(b.get('port') or 4001)}"
+                cur = ctx.cfg["scale"]["connection"]
+                if not ctx.sim and cur.split("?")[0] == url:
+                    return JSONResponse(await live_scale_check())
                 return JSONResponse(await _run(st.test_scale, b, b.get("parser", "cas")))
             if kind == "io":
                 return JSONResponse(await _run(st.test_io, b))

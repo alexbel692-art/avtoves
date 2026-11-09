@@ -152,6 +152,8 @@ class Scale:
         self.history: deque[tuple[float, float]] = deque(maxlen=400)
         self.raw_lines: deque[str] = deque(maxlen=30)
         self.connected = False
+        self.link = False          # соединение с NPort / COM-портом открыто
+        self.rx_bytes = 0          # сколько байт пришло от индикатора
         self.error = ""
         self._stop = threading.Event()
         self._thr = threading.Thread(target=self._run, name="scale", daemon=True)
@@ -169,6 +171,7 @@ class Scale:
             tr = _Transport(self.cfg["connection"])
             try:
                 tr.open()
+                self.link = True
                 log.info("Весы: подключено %s", self.cfg["connection"])
                 self.error = ""
                 backoff = 1
@@ -176,6 +179,7 @@ class Scale:
                 while not self._stop.is_set():
                     chunk = tr.read()
                     if chunk:
+                        self.rx_bytes += len(chunk)
                         buf += chunk
                         *lines, buf = re.split(rb"\r\n|\n|\r", buf)
                         for ln in lines:
@@ -185,9 +189,11 @@ class Scale:
                     self.connected = self.last is not None and time.time() - self.last.ts < self.cfg["timeout_sec"]
             except Exception as e:  # noqa: BLE001
                 self.connected = False
+                self.link = False
                 self.error = str(e)
                 log.warning("Весы: %s, повтор через %s с", e, backoff)
             finally:
+                self.link = False
                 tr.close()
             self._stop.wait(backoff)
             backoff = min(backoff * 2, 15)
