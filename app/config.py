@@ -31,7 +31,7 @@ DEFAULTS = {
     # газовозы: газ в машине = вес − тара пустой машины; литры = кг / плотность
     "gas": {"enabled": True, "name": "СУГ (пропан-бутан)", "density": 0.54, "show_liters": True},
     "anpr": {
-        "engine": "fast_alpr", "detector_model": "yolo-v9-t-384-license-plate-end2end",
+        "enabled": True, "engine": "fast_alpr", "detector_model": "yolo-v9-t-384-license-plate-end2end",
         "ocr_model": "cct-xs-v1-global-model", "interval_ms": 300,
         "min_confidence": 0.5, "country": "ru",
     },

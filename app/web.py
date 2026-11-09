@@ -12,8 +12,9 @@ from datetime import datetime
 from pathlib import Path
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, Response,
+from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response,
                                  StreamingResponse)
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
@@ -21,6 +22,7 @@ from starlette.staticfiles import StaticFiles
 from . import __version__
 from . import settings as st
 from .drivers import DriverAuth
+from .operator_auth import COOKIE as OP_COOKIE, DAYS as OP_DAYS, OperatorAuth, OperatorGate
 from .plates import normalize as norm_plate
 from .weighing import DriverError
 from .io_control import LIGHT_GREEN, LIGHT_OFF, LIGHT_RED
@@ -92,6 +94,7 @@ def build_app(ctx) -> Starlette:
             "io": ctx.io.snapshot(),
             "cameras": [c.snapshot() for c in ctx.cameras],
             "anpr_error": ctx.anpr.error,
+            "anpr_enabled": bool(ctx.cfg["anpr"].get("enabled", True)),
             "ctrl": ctrl_state(),
             "reads": [{"ts": datetime.fromtimestamp(r.ts).strftime("%H:%M:%S"), "camera": r.camera,
                        "plate": r.plate, "conf": round(r.conf, 2), "valid": r.valid}
@@ -357,11 +360,16 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         res = await loop.run_in_executor(None, ctx.reload)
         logging.getLogger("settings").info("Настройки сохранены (%s)", request.client.host if request.client else "?")
         out = {"ok": True, **res}
+        new_op = new["server"].get("operator_password")
+        op_changed = new_op != raw.get("server", {}).get("operator_password")
         if pw_changed:
             sessions.clear()
             # тот, кто поставил пароль, остаётся в настройках; пароль снят — вход не нужен
             out["token"] = sessions.new() if new["server"].get("settings_password") else None
-        return JSONResponse(out)
+        resp = JSONResponse(out)
+        if op_changed and new_op:
+            _op_cookie(resp, new_op)       # тот, кто поставил пароль оператора, остаётся в программе
+        return resp
 
     async def _run(fn, *a, timeout=25):
         loop = asyncio.get_running_loop()
@@ -426,6 +434,43 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         logging.getLogger("settings").warning("Перезапуск по запросу из настроек")
         asyncio.get_running_loop().call_later(1.0, os._exit, 3)
         return JSONResponse({"ok": True})
+
+    # ---------------------------------------------------------- вход оператора
+    opauth = OperatorAuth(cfg["data_dir"])
+
+    def _op_cookie(resp: Response, stored: str):
+        resp.set_cookie(OP_COOKIE, opauth.cookie(stored), max_age=OP_DAYS * 86400, httponly=True, samesite="lax")
+
+    async def login_page(_):
+        return FileResponse(STATIC / "login.html", headers=NO_CACHE)
+
+    async def op_login(request: Request):
+        ip = request.client.host if request.client else "?"
+        stored = ctx.cfg["server"].get("operator_password", "")
+        if not stored:
+            return JSONResponse({"ok": True})
+        if opauth.blocked(ip):
+            return JSONResponse({"error": "слишком много неверных попыток — подождите 5 минут"}, 429)
+        pw = str((await request.json()).get("password", ""))
+        if not st.check_password(pw, stored):
+            opauth.failed(ip)
+            await asyncio.sleep(1.0)
+            return JSONResponse({"error": "неверный пароль"}, 403)
+        resp = JSONResponse({"ok": True})
+        _op_cookie(resp, stored)
+        logging.getLogger("auth").info("Вход оператора с %s", ip)
+        return resp
+
+    async def op_logout(_):
+        resp = RedirectResponse("/login", 302)
+        resp.delete_cookie(OP_COOKIE)
+        return resp
+
+    async def op_status(_):
+        return JSONResponse({"protected": bool(ctx.cfg["server"].get("operator_password"))})
+
+    async def ping(_):
+        return JSONResponse({"ok": True, "version": __version__})
 
     # ---------------------------------------------------------- водители: справочник (оператор)
     dauth = DriverAuth(cfg["data_dir"])
@@ -538,14 +583,15 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
             "seen_plate": cand.get("plate") if cand.get("camera") != "оператор" else None,
             "driver_mode": c.get("driver_mode"),
             "today": [{"id": w["id"], "ts": w["ts"], "plate": w["plate"], "weight": w["weight"], "kind": w["kind"],
-                       "trip_id": w["trip_id"], "net": w["net"], "photo": _photo(w["snapshots"])} for w in mine],
+                       "trip_id": w["trip_id"], "net": w["net"], "photo": _photo(w["snapshots"], request.headers.get("x-driver-token", ""))}
+                      for w in mine],
         })
 
-    def _photo(snaps: str) -> str | None:
+    def _photo(snaps: str, token: str = "") -> str | None:
         files = [x for x in (snaps or "").split(";") if x]
         cam = [x for x in files if not x.endswith("_plate.jpg")]
         pick = (cam or files or [None])[0]
-        return f"/snapshots/{pick}" if pick else None
+        return f"/snapshots/{pick}?t={token}" if pick else None
 
     async def driver_weigh(request: Request):
         d = _driver(request)
@@ -571,12 +617,23 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
             "ok": True, "weight": res["weight"], "ts": res["ts"], "plate": res["plate"], "direction": direction,
             "trip": {"id": t["id"], "status": t["status"], "w1": t["w1"], "w2": t["w2"], "net": t["net"]},
             "gas": gas_info(t) if gas_cfg()["enabled"] else None,
-            "photo": _photo(";".join(res.get("snapshots") or [])),
+            "photo": _photo(";".join(res.get("snapshots") or []), request.headers.get("x-driver-token", "")),
         })
 
     snap_dir = Path(cfg["data_dir"]) / "snapshots"
-    return Starlette(routes=[
+    def driver_token_ok(t: str | None) -> bool:
+        did = dauth.check(t)
+        d = db.driver(did) if did else None
+        return bool(d and d["active"])
+
+    return Starlette(middleware=[Middleware(OperatorGate, ctx=ctx, auth=opauth, driver_token_ok=driver_token_ok)],
+                     routes=[
         Route("/", index),
+        Route("/login", login_page),
+        Route("/logout", op_logout),
+        Route("/api/op/login", op_login, methods=["POST"]),
+        Route("/api/op/status", op_status),
+        Route("/api/ping", ping),
         Route("/api/state", state),
         Route("/api/cam/{cid}.jpg", cam_jpg),
         Route("/api/plate_crop.jpg", plate_crop),

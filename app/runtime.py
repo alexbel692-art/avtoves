@@ -55,9 +55,10 @@ class Runtime:
         if cfg["simulate"]:
             sim = self._sim_world()
             cfg["scale"]["connection"] = f"tcp://127.0.0.1:{SIM_SCALE_PORT}"
-            cfg["io"].update(enabled=True, device="moxa", host="127.0.0.1", port=SIM_IO_PORT, coil_base=0, di_base=0)
-            cfg["io"]["relays"] = {"a_red": 0, "a_green": 1, "b_red": 2, "b_green": 3,
-                                   "barrier_a": None, "barrier_b": None}
+            if cfg["io"].get("enabled"):     # светофоры имитируем, только если они включены в настройках
+                cfg["io"].update(enabled=True, device="moxa", host="127.0.0.1", port=SIM_IO_PORT, coil_base=0, di_base=0)
+                cfg["io"]["relays"] = {"a_red": 0, "a_green": 1, "b_red": 2, "b_green": 3,
+                                       "barrier_a": None, "barrier_b": None}
             cfg["io"]["inputs"] = {"ir_a": None, "ir_b": None}
             if not cfg["cameras"]:
                 cfg["cameras"] = [{"id": "cam_a", "name": "Въезд А", "side": "a"},
@@ -69,10 +70,15 @@ class Runtime:
                    for c in cfg["cameras"]]
         anpr = ANPRService(cfg["anpr"], cameras, self.tracker, SimRecognizer(sim) if sim else None)
         ctrl = WeighingController(cfg, scale, io, self.tracker, cameras, self.db)
+        if sim:
+            from .weighing import FIXED
+            sim.exit_ok = None if cfg["io"].get("enabled") else (lambda: ctrl.state == FIXED)
         if self.ctrl is not None:
             ctrl.events.extend(self.ctrl.events)    # журнал событий не теряем
         self.cfg, self.scale, self.io, self.cameras, self.anpr, self.ctrl = cfg, scale, io, cameras, anpr, ctrl
-        for part in (scale, io, *cameras, anpr, ctrl):
+        # распознавание номеров можно выключить: камеры тогда только делают фото при взвешивании
+        parts = [scale, io, *cameras, ctrl] + ([anpr] if cfg["anpr"].get("enabled", True) else [])
+        for part in parts:
             part.start()
 
     def _stop(self):

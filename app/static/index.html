@@ -20,6 +20,7 @@
   </nav>
   <div class="status" id="hdrStatus"></div>
   <div class="clock" id="clock"></div>
+  <a href="/logout" class="logout" id="logout" hidden title="Выйти из программы">Выйти</a>
 </header>
 
 <!-- ===================== ОПЕРАТОР ===================== -->
@@ -65,7 +66,7 @@
   </section>
 
   <section class="col-right">
-    <div class="lights card">
+    <div class="lights card" id="lightsCard">
       <div class="light-box" data-side="a">
         <div class="tl"><i class="r"></i><i class="g"></i></div>
         <div>
@@ -98,7 +99,7 @@
         <div class="label">События</div>
         <ul class="events" id="events"></ul>
       </div>
-      <div class="card">
+      <div class="card" id="readsCard">
         <div class="label">Распознанные номера</div>
         <ul class="events" id="reads"></ul>
       </div>
@@ -341,7 +342,10 @@
 
     <section class="card">
       <h3>Распознавание номеров</h3>
-      <div class="grid">
+      <label class="chk"><input type="checkbox" name="anpr.enabled"> распознавать номера по камерам</label>
+      <div class="muted">Выключено — камеры только фотографируют машину при взвешивании, номер вводит оператор или выбирает водитель.
+        Для боковых камер, которые не видят номер, распознавание лучше выключить.</div>
+      <div class="grid" data-show="anpr.enabled" style="margin-top:8px">
         <label>Мин. уверенность (0,1–0,99) <input name="anpr.min_confidence" type="number" step="0.05"></label>
         <label>Распознавать кадр раз в, мс <input name="anpr.interval_ms" type="number" step="50"></label>
       </div>
@@ -355,6 +359,11 @@
           <span class="inline"><input name="server.api_token"><button type="button" id="tokGen">Новый</button><button type="button" id="tokCopy">Копировать</button></span></label>
       </div>
       <div class="grid">
+        <label>Пароль оператора — вход в программу <input name="server.new_op_password" type="password" placeholder="не менять" autocomplete="new-password"></label>
+        <label class="chk" id="opClearWrap"><input type="checkbox" name="server.clear_op_password"> снять пароль оператора</label>
+      </div>
+      <div class="muted" id="opState"></div>
+      <div class="grid" style="margin-top:10px">
         <label>Пароль на настройки <input name="server.new_password" type="password" placeholder="не менять" autocomplete="new-password"></label>
         <label class="chk" id="pwClearWrap"><input type="checkbox" name="server.clear_password"> снять пароль</label>
       </div>

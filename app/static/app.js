@@ -1,6 +1,16 @@
 "use strict";
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+// Все запросы: если вход оператора истёк или пароль сменили — на страницу входа
+const _fetch = window.fetch.bind(window);
+window.fetch = async (...a) => {
+  const r = await _fetch(...a);
+  if (r.status === 401) {
+    const j = await r.clone().json().catch(() => ({}));
+    if (j.need_op_login) { location.href = "/login"; throw new Error("login"); }
+  }
+  return r;
+};
 const api = async (url, body, method) => {
   const r = await fetch(url, body === undefined && !method ? {} : {
     method: method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}),
@@ -8,6 +18,7 @@ const api = async (url, body, method) => {
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 };
+fetch("/api/op/status").then(r => r.json()).then(j => { $("#logout").hidden = !j.protected; }).catch(() => {});
 const kg = v => v === null || v === undefined ? "—" : Math.round(v).toLocaleString("ru-RU");
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const pretty = p => { const m = /^(\D)(\d{3})(\D{2})(\d{2,3})$/.exec(p || ""); return m ? m.slice(1).join(" ") : (p || ""); };
@@ -64,7 +75,7 @@ function render(s) {
   const sc = s.scale, io = s.io, c = s.ctrl;
   $("#hdrStatus").innerHTML =
     `<span class="${sc.connected ? "on" : "off"}">Весы</span>` +
-    `<span class="${!io.enabled || io.connected ? "on" : "off"}">Светофоры</span>` +
+    (io.enabled ? `<span class="${io.connected ? "on" : "off"}">Светофоры</span>` : "") +
     s.cameras.map(k => `<span class="${k.connected ? "on" : "off"}">${esc(k.name)}</span>`).join("") +
     (s.simulate ? `<span class="on">ИМИТАЦИЯ</span>` : "");
 
@@ -103,6 +114,8 @@ function render(s) {
     $(`[data-barrier=${side}]`).hidden = !io.barriers.includes(side);
   }
   $("#manual").checked = io.manual;
+  $("#lightsCard").hidden = !io.enabled;          // светофоры выключены в настройках — панель не нужна
+  $("#readsCard").hidden = !s.anpr_enabled;
 
   if (c.last) {
     const t = c.last.trip;
@@ -123,7 +136,7 @@ function render(s) {
     `Весы: ${sc.connected ? "на связи" : "нет связи — " + esc(sc.error)}`,
     `Модуль светофоров: ${!io.enabled ? "выключен в настройках" : io.connected ? "на связи" : "нет связи — " + esc(io.error)}`,
     ...s.cameras.map(k => `Камера ${esc(k.name)}: ${k.connected ? "есть видео" : "нет видео " + esc(k.error)}`),
-    `Распознавание: ${s.anpr_error ? esc(s.anpr_error) : "работает"}`,
+    `Распознавание номеров: ${!s.anpr_enabled ? "выключено (камеры только фотографируют)" : s.anpr_error ? esc(s.anpr_error) : "работает"}`,
     `ИК-барьеры: ${Object.keys(io.inputs).length ? Object.entries(io.inputs).map(([k, v]) => k + "=" + (v ? "перекрыт" : "свободен")).join(", ") : "не подключены"}`,
   ].map(x => `<div>${x}</div>`).join("");
   $("#diagRaw").textContent = sc.raw.map(l => JSON.stringify(l)).join("\n") || "нет данных";
@@ -293,13 +306,16 @@ const SettingsUI = (() => {
 
   function fill(d) {
     $$("[name]", form).forEach(el => {
-      if (el.name.startsWith("server.new_password") || el.name === "server.clear_password") { el.value = ""; el.checked = false; return; }
+      if (["server.new_password", "server.clear_password", "server.new_op_password", "server.clear_op_password"].includes(el.name)) { el.value = ""; el.checked = false; return; }
       const v = get(d, el.name);
       if (el.type === "checkbox") el.checked = !!v;
       else el.value = v === null || v === undefined ? "" : v;
     });
     $("#pwState").textContent = d.server.protected ? "Пароль на настройки установлен." : "Пароля нет — настройки может изменить любой, кто открыл АвтоВес.";
     $("#pwClearWrap").hidden = !d.server.protected;
+    $("#opState").textContent = d.server.op_protected ? "Пароль оператора установлен: программа открывается только после входа."
+      : "Пароля оператора нет — программу может открыть любой в сети (в том числе водители по Wi-Fi).";
+    $("#opClearWrap").hidden = !d.server.op_protected;
     renderCams(d.cameras || []);
     lastDevice = null; onDevice();
     clearErrors();

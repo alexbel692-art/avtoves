@@ -248,7 +248,7 @@ namespace AvtoVes
             checking = true;
             // сервер на этом компьютере: порт мог смениться в настройках — перечитываем
             if (!Settings.FixedUrl) url = Settings.ServerUrl(new string[0]);
-            string probe = url + "api/state";
+            string probe = url + "api/ping";   // не требует входа оператора
             Task.Factory.StartNew(delegate
             {
                 bool ok = false;
@@ -258,6 +258,11 @@ namespace AvtoVes
                     r.Timeout = 1500;
                     r.Proxy = null;
                     using (HttpWebResponse resp = (HttpWebResponse)r.GetResponse()) ok = resp.StatusCode == HttpStatusCode.OK;
+                }
+                catch (WebException wex)
+                {
+                    // сервер ответил (например, просит вход) — значит, он работает
+                    if (wex.Response != null) { ok = true; wex.Response.Close(); }
                 }
                 catch { }
                 return ok;

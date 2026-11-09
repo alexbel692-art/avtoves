@@ -124,13 +124,15 @@ def to_form(raw: dict) -> dict:
         },
         "weighing": {k: w.get(k) for k in ("mode", "auto_fix", "driver_mode", "clear_time", "trip_max_hours",
                                            "plate_window_sec")},
-        "anpr": {"min_confidence": an.get("min_confidence"), "interval_ms": an.get("interval_ms")},
+        "anpr": {"enabled": bool(an.get("enabled", True)), "min_confidence": an.get("min_confidence"),
+                 "interval_ms": an.get("interval_ms")},
         "gas": {k: c["gas"].get(k) for k in ("enabled", "name", "density", "show_liters")},
         "cameras": [{"id": cam.get("id", f"cam{i + 1}"), "name": cam.get("name", ""), "side": cam.get("side"),
                      "url": cam.get("url", ""), "anpr": bool(cam.get("anpr", True))}
                     for i, cam in enumerate(c.get("cameras") or [])],
         "server": {"port": sv.get("port"), "api_token": sv.get("api_token", ""),
-                   "protected": bool(sv.get("settings_password"))},
+                   "protected": bool(sv.get("settings_password")),
+                   "op_protected": bool(sv.get("operator_password"))},
     }
 
 
@@ -246,6 +248,7 @@ def apply_form(raw: dict, f: dict) -> dict:
     out["weighing"]["plate_window_sec"] = _num(w.get("plate_window_sec"), "weighing.plate_window_sec", e, 5, 600, int)
 
     a = f.get("anpr", {})
+    out["anpr"]["enabled"] = bool(a.get("enabled"))
     out["anpr"]["min_confidence"] = _num(a.get("min_confidence"), "anpr.min_confidence", e, 0.1, 0.99)
     out["anpr"]["interval_ms"] = _num(a.get("interval_ms"), "anpr.interval_ms", e, 50, 5000, int)
 
@@ -279,6 +282,14 @@ def apply_form(raw: dict, f: dict) -> dict:
     if tok and not re.fullmatch(r"[A-Za-z0-9_\-]{12,128}", tok):
         e["server.api_token"] = "12–128 символов: латиница, цифры, - и _"
     out["server"]["api_token"] = tok or secrets.token_urlsafe(24)
+    if sv.get("clear_op_password"):
+        out["server"].pop("operator_password", None)
+    elif sv.get("new_op_password"):
+        opw = str(sv["new_op_password"])
+        if len(opw) < 4:
+            e["server.new_op_password"] = "не короче 4 символов"
+        else:
+            out["server"]["operator_password"] = hash_password(opw)
     if sv.get("clear_password"):
         out["server"].pop("settings_password", None)
     elif sv.get("new_password"):

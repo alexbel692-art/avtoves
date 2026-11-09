@@ -17,6 +17,7 @@ from .plates import TO_LAT
 
 class SimWorld:
     def __init__(self):
+        self.exit_ok = None    # без светофоров: функция «вес записан, можно съезжать» (задаёт Runtime)
         self.weight = 0.0
         self.target = 0.0
         self.plate_visible: tuple[str, str] | None = None   # (номер, сторона)
@@ -52,6 +53,8 @@ class SimWorld:
             self.busy = False
 
     def _exit_green(self, side):
+        if self.exit_ok:
+            return self.exit_ok()
         return self.coils[3] if side == "a" else self.coils[1]
 
     def _ramp(self, to: float, sec: float):

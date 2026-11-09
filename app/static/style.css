@@ -158,3 +158,6 @@ td.gas-out { color: var(--ok); } td.gas-in { color: #4ea1ff; }
 .drv-url { font-family: var(--mono); font-size: 20px; color: var(--accent); margin: 4px 0 8px; user-select: all; }
 #drvQr { width: 150px; height: 150px; background: #fff; padding: 8px; border-radius: 8px; flex: none; }
 .src-driver { color: #4ea1ff; }
+
+.logout { color: var(--muted); font-size: 12px; text-decoration: none; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+.logout:hover { color: var(--text); }
