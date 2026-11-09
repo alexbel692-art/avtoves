@@ -57,8 +57,7 @@ def build_app(ctx) -> Starlette:
         d = g["density"] or 0.54
         g_in, g_out = t["gas_in"], t.get("gas_out")
         delta = round(g_in - g_out, 1) if g_out is not None else None
-        veh = db.vehicle(t["plate"]) if t.get("plate") else None
-        tank = (veh or {}).get("tank_l")
+        tank = db.tank_volume(t.get("plate") or "", t.get("trailer") or "")
         lit = lambda kg: round(kg / d) if kg is not None else None  # noqa: E731
         pct = lambda kg: round(kg / d / tank * 100) if (kg is not None and tank) else None  # noqa: E731
         return {"tare": t.get("gas_tare"), "in_kg": g_in, "out_kg": g_out, "delta_kg": delta,
@@ -120,7 +119,8 @@ def build_app(ctx) -> Starlette:
         return JSONResponse({"ok": True})
 
     async def set_plate(request: Request):
-        ctx.ctrl.set_plate((await request.json()).get("plate", ""))
+        b = await request.json()
+        ctx.ctrl.set_plate(b.get("plate", ""), b.get("trailer"))
         return JSONResponse({"ok": True})
 
     async def reset(_):
@@ -179,7 +179,7 @@ def build_app(ctx) -> Starlette:
         wb = Workbook()
         ws = wb.active
         ws.title = "Взвешивания"
-        head = ["№", "Номер ТС", "1-е взвеш.", "Вес 1, кг", "2-е взвеш.", "Вес 2, кг", "Брутто, кг",
+        head = ["№", "Номер ТС", "Прицеп", "1-е взвеш.", "Вес 1, кг", "2-е взвеш.", "Вес 2, кг", "Брутто, кг",
                 "Тара, кг", "Нетто, кг", "Груз", "Контрагент", "Водитель", "Статус", "Комментарий"]
         gas_on = gas_cfg()["enabled"]
         if gas_on:
@@ -189,7 +189,7 @@ def build_app(ctx) -> Starlette:
         for c in ws[1]:
             c.font = Font(bold=True)
         for r in rows:
-            row = [r["id"], r["plate"], r["w1_ts"], r["w1"], r["w2_ts"], r["w2"], r["gross"],
+            row = [r["id"], r["plate"], r.get("trailer") or "", r["w1_ts"], r["w1"], r["w2_ts"], r["w2"], r["gross"],
                    r["tare"], r["net"], r["cargo"], r["counterparty"], r["driver"],
                    {"open": "открыт", "closed": "закрыт", "cancelled": "отменён"}.get(r["status"]),
                    r["comment"]]
@@ -198,8 +198,8 @@ def build_app(ctx) -> Starlette:
                 row += [g.get("tare"), g.get("in_kg"), g.get("out_kg"), g.get("delta_kg"),
                         g.get("in_l"), g.get("out_l"), g.get("delta_l")]
             ws.append(row)
-        for col, wdt in zip("ABCDEFGHIJKLMNOPQRSTU", (6, 12, 20, 11, 20, 11, 11, 11, 11, 18, 24, 18, 10, 30,
-                                                       14, 16, 16, 18, 14, 14, 14)):
+        for col, wdt in zip("ABCDEFGHIJKLMNOPQRSTUV", (6, 12, 12, 20, 11, 20, 11, 11, 11, 11, 18, 24, 18, 10, 30,
+                                                        14, 16, 16, 18, 14, 14, 14)):
             ws.column_dimensions[col].width = wdt
         buf = io.BytesIO()
         wb.save(buf)
@@ -236,6 +236,7 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
 <h2>Талон взвешивания №{t['id']}</h2>
 <table>
 <tr><td>Номер ТС</td><td class="n">{e(pretty(t['plate']))}</td></tr>
+{f"<tr><td>Прицеп</td><td class='n'>{e(pretty(t['trailer']))}</td></tr>" if t.get('trailer') else ""}
 <tr><td>Контрагент</td><td>{e(t['counterparty'])}</td></tr>
 <tr><td>Водитель</td><td>{e(t['driver'])}</td></tr>
 <tr><td>Груз</td><td>{e(t['cargo'])}</td></tr>
@@ -293,7 +294,7 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         only_new = request.query_params.get("only_new", "1") != "0"
         rows = db.trips_for_1c(only_new, request.query_params.get("from"))
         return JSONResponse([{
-            "id": r["id"], "plate": r["plate"], "date": r["w2_ts"] or r["w1_ts"],
+            "id": r["id"], "plate": r["plate"], "trailer": r.get("trailer") or "", "date": r["w2_ts"] or r["w1_ts"],
             "w1_date": r["w1_ts"], "w1": r["w1"], "w2_date": r["w2_ts"], "w2": r["w2"],
             "gross": r["gross"], "tare": r["tare"], "net": r["net"],
             "direction": r["direction"], "cargo": r["cargo"], "counterparty": r["counterparty"],
@@ -574,16 +575,19 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         sc, c = ctx.scale.snapshot(), ctx.ctrl.snapshot()
         today = datetime.now().strftime("%Y-%m-%dT00:00:00")
         mine = db.driver_weighings(d["id"], today)
-        plates = sorted({v["plate"] for v in db.vehicles()} | ({d["plate"]} if d["plate"] else set()))
+        vs = db.vehicles()
+        plates = sorted({v["plate"] for v in vs if v.get("kind") != "trailer"} | ({d["plate"]} if d["plate"] else set()))
+        trailers = sorted(v["plate"] for v in vs if v.get("kind") == "trailer")
         cand = c.get("plate") or {}
         return JSONResponse({
-            "driver": d, "plates": plates,
+            "driver": d, "plates": plates, "trailers": trailers,
+            "kinds": {v["plate"]: v.get("kind") or "" for v in vs},
             "scale": {"connected": sc["connected"], "weight": sc["weight"], "stable": sc["stable"]},
             "state": c["state"], "state_text": c["state_text"], "warning": c["warning"],
             "seen_plate": cand.get("plate") if cand.get("camera") != "оператор" else None,
             "driver_mode": c.get("driver_mode"),
             "today": [{"id": w["id"], "ts": w["ts"], "plate": w["plate"], "weight": w["weight"], "kind": w["kind"],
-                       "trip_id": w["trip_id"], "net": w["net"], "photo": _photo(w["snapshots"], request.headers.get("x-driver-token", ""))}
+                       "trailer": w.get("trailer", ""), "trip_id": w["trip_id"], "net": w["net"], "photo": _photo(w["snapshots"], request.headers.get("x-driver-token", ""))}
                       for w in mine],
         })
 
@@ -604,17 +608,21 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
             return JSONResponse({"error": "выберите: приехал или уехал"}, 400)
         if len(plate) < 6:
             return JSONResponse({"error": "выберите номер вашей машины"}, 400)
+        trailer = norm_plate(str(b.get("trailer") or ""))[0] if b.get("trailer") else ""
+        if trailer and trailer == plate:
+            return JSONResponse({"error": "прицеп не может совпадать с машиной"}, 400)
         veh = db.vehicle(plate)
         if veh and veh.get("blocked"):
             return JSONResponse({"error": "машина в стоп-листе — обратитесь к весовщику"}, 403)
         loop = asyncio.get_running_loop()
         try:
-            res = await loop.run_in_executor(None, ctx.ctrl.fix_by_driver, d, plate, direction)
+            res = await loop.run_in_executor(None, lambda: ctx.ctrl.fix_by_driver(d, plate, direction, trailer=trailer))
         except DriverError as ex:
             return JSONResponse({"error": str(ex)}, 409)
         t = db.trip(res["trip"]["id"])
         return JSONResponse({
-            "ok": True, "weight": res["weight"], "ts": res["ts"], "plate": res["plate"], "direction": direction,
+            "ok": True, "weight": res["weight"], "ts": res["ts"], "plate": res["plate"], "trailer": trailer,
+            "direction": direction,
             "trip": {"id": t["id"], "status": t["status"], "w1": t["w1"], "w2": t["w2"], "net": t["net"]},
             "gas": gas_info(t) if gas_cfg()["enabled"] else None,
             "photo": _photo(";".join(res.get("snapshots") or []), request.headers.get("x-driver-token", "")),

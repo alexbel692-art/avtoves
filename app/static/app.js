@@ -38,8 +38,44 @@ function gasBox(g, t) {
   return h + `</div>`;
 }
 
+// ---------------- табло: семисегментные цифры как на индикаторе
+const SEG = (() => {
+  const t = 10, g = 1.6, H = (x1, x2, y) => [[x1, y], [x1 + t / 2, y - t / 2], [x2 - t / 2, y - t / 2], [x2, y], [x2 - t / 2, y + t / 2], [x1 + t / 2, y + t / 2]],
+    V = (x, y1, y2) => [[x, y1], [x + t / 2, y1 + t / 2], [x + t / 2, y2 - t / 2], [x, y2], [x - t / 2, y2 - t / 2], [x - t / 2, y1 + t / 2]];
+  const P = { a: H(8 + g, 48 - g, 6), b: V(48, 6 + g, 50 - g), c: V(48, 50 + g, 94 - g), d: H(8 + g, 48 - g, 94),
+    e: V(8, 50 + g, 94 - g), f: V(8, 6 + g, 50 - g), g: H(8 + g, 48 - g, 50) };
+  const MAP = { "0": "abcdef", "1": "bc", "2": "abged", "3": "abgcd", "4": "fgbc", "5": "afgcd", "6": "afgedc", "7": "abc",
+    "8": "abcdefg", "9": "abcdfg", "-": "g", " ": "" };
+  const W = 62, N = 6;
+  return (svg, text) => {
+    const s = String(text).padStart(N, " ").slice(-N);
+    if (svg.dataset.v === s) return;
+    svg.dataset.v = s;
+    svg.setAttribute("viewBox", `-4 0 ${W * N} 100`);
+    let h = `<g transform="skewX(-7) translate(10 0)">`;
+    [...s].forEach((ch, i) => {
+      const on = MAP[ch] ?? "";
+      for (const k of "abcdefg")
+        h += `<polygon class="${on.includes(k) ? "on" : "off"}" points="${P[k].map(([x, y]) => `${x + i * W},${y}`).join(" ")}"/>`;
+    });
+    svg.innerHTML = h + "</g>";
+  };
+})();
+
+// ---------------- тема
+const setTheme = d => { document.body.classList.toggle("dark", d); $("#themeBtn").textContent = d ? "Светлая тема" : "Тёмная тема"; try { localStorage.setItem("avtoves.theme", d ? "dark" : "light"); } catch (e) {} };
+try { setTheme(localStorage.getItem("avtoves.theme") === "dark"); } catch (e) {}
+$("#themeBtn").onclick = () => setTheme(!document.body.classList.contains("dark"));
+
+// ---------------- лупа для фото
+const lightbox = $("#lightbox");
+const zoom = src => { $("img", lightbox).src = src; lightbox.hidden = false; };
+lightbox.onclick = () => { lightbox.hidden = true; };
+document.addEventListener("keydown", e => { if (e.key === "Escape") lightbox.hidden = true; });
+
 // ---------------- вкладки
 $$("nav button").forEach(b => b.onclick = () => {
+  $("#pageTitle").textContent = b.dataset.title || b.textContent;
   $$("nav button").forEach(x => x.classList.toggle("active", x === b));
   $$(".tab").forEach(t => t.classList.toggle("active", t.id === "tab-" + b.dataset.tab));
   if (b.dataset.tab === "journal") loadJournal();
@@ -69,7 +105,8 @@ function refreshCams() {
 
 let lastCropKey = "";
 function render(s) {
-  $("#clock").textContent = s.time;
+  $("#clock").textContent = (s.time || "").slice(-8, -3) || s.time;
+  $("#date").textContent = new Date().toLocaleDateString("ru-RU", { weekday: "short", day: "numeric", month: "long" });
   if (s.gas) { GAS = s.gas; document.body.classList.toggle("no-gas", !GAS.enabled); }
   $("#ver").textContent = "v" + s.version;
   const sc = s.scale, io = s.io, c = s.ctrl;
@@ -77,10 +114,10 @@ function render(s) {
     `<span class="${sc.connected ? "on" : "off"}">Весы</span>` +
     (io.enabled ? `<span class="${io.connected ? "on" : "off"}">Светофоры</span>` : "") +
     s.cameras.map(k => `<span class="${k.connected ? "on" : "off"}">${esc(k.name)}</span>`).join("") +
-    (s.simulate ? `<span class="on">ИМИТАЦИЯ</span>` : "");
+    (s.simulate ? `<span class="sim">ИМИТАЦИЯ</span>` : "");
 
   const w = $("#weight");
-  w.textContent = sc.connected ? kg(sc.weight) : "- - -";
+  SEG($("#seg"), sc.connected && sc.weight !== null && sc.weight !== undefined ? Math.round(sc.weight) : "------");
   w.classList.toggle("stable", !!sc.stable);
   $("#fStable").classList.toggle("lit", !!sc.stable);
   $("#fConn").classList.toggle("lit", !!sc.connected);
@@ -94,6 +131,7 @@ function render(s) {
   const plateEl = $("#plate");
   plateEl.textContent = p ? pretty(p.plate) : (c.state === "free" ? "—" : "не распознан");
   plateEl.classList.toggle("empty", !p);
+  $("#plateTrailer").textContent = c.trailer_override ? "+ прицеп " + pretty(c.trailer_override) : "";
   $("#plateMeta").textContent = p ? [
     p.camera === "оператор" ? "введён оператором" : `камера ${p.camera}, уверенность ${(p.conf * 100).toFixed(0)}%, кадров ${p.votes}`,
     p.valid ? "" : "формат не РФ",
@@ -121,7 +159,7 @@ function render(s) {
     const t = c.last.trip;
     $("#lastCard").hidden = false;
     $("#lastBody").innerHTML = `
-      <div><span class="big">${kg(c.last.weight)} кг</span> · ${esc(pretty(c.last.plate) || "без номера")} · ${esc(c.last.kind)} взвешивание</div>
+      <div><span class="big">${kg(c.last.weight)} кг</span> · ${esc(pretty(c.last.plate) || "без номера")}${c.last.trailer ? " + " + esc(pretty(c.last.trailer)) : ""} · ${esc(c.last.kind)} взвешивание</div>
       ${t.status === "closed" ? `<div>Брутто ${kg(t.gross)} · Тара ${kg(t.tare)} · <b>Нетто ${kg(t.net)} кг</b></div>` : ""}
       ${gasBox(c.last.gas, t)}
       <div><a href="/ticket/${t.id}" target="_blank">Талон №${t.id}</a> · <a href="#" data-edit="${t.id}">Изменить</a></div>`;
@@ -158,7 +196,20 @@ setInterval(refreshCams, 1000);
 
 $("#btnFix").onclick = () => api("/api/fix");
 $("#btnReset").onclick = () => confirm("Сбросить текущий цикл взвешивания?") && api("/api/reset");
-$("#btnPlate").onclick = () => { api("/api/plate", { plate: $("#plateInput").value }); $("#plateInput").value = ""; };
+$("#btnPlate").onclick = () => {
+  api("/api/plate", { plate: $("#plateInput").value, trailer: $("#trailerInput").value });
+  $("#plateInput").value = ""; $("#trailerInput").value = "";
+};
+$("#trailerInput").onkeydown = e => e.key === "Enter" && $("#btnPlate").click();
+// подсказки номеров из справочника
+async function loadPlateHints() {
+  try {
+    const vs = await api("/api/vehicles");
+    $("#dlTrucks").innerHTML = vs.filter(v => v.kind !== "trailer").map(v => `<option value="${esc(v.plate)}">`).join("");
+    $("#dlTrailers").innerHTML = vs.filter(v => v.kind === "trailer").map(v => `<option value="${esc(v.plate)}">`).join("");
+  } catch (e) {}
+}
+loadPlateHints();
 $("#plateInput").onkeydown = e => e.key === "Enter" && $("#btnPlate").click();
 $$("[data-light]").forEach(b => b.onclick = () => {
   const [side, state] = b.dataset.light.split(":");
@@ -178,8 +229,8 @@ async function loadJournal() {
   journal = await api("/api/trips?" + jQuery());
   const stText = { open: "открыт", closed: "закрыт", cancelled: "отменён" };
   $("#jTable tbody").innerHTML = journal.map(t => `
-    <tr>
-      <td>${t.id}</td><td><b>${esc(pretty(t.plate) || "—")}</b></td>
+    <tr data-trip="${t.id}">
+      <td>${t.id}</td><td><b>${esc(pretty(t.plate) || "—")}</b>${t.trailer ? `<span class="trl"> + ${esc(pretty(t.trailer))}</span>` : ""}</td>
       <td>${dt(t.w1_ts)}</td><td class="num">${kg(t.w1)}</td>
       <td>${dt(t.w2_ts)}</td><td class="num">${kg(t.w2)}</td>
       <td class="num"><b>${kg(t.net)}</b></td>
@@ -193,10 +244,50 @@ async function loadJournal() {
   const net = journal.filter(t => t.status === "closed").reduce((a, t) => a + (t.net || 0), 0);
   const gOut = journal.reduce((a, t) => a + (t.gas && t.gas.delta_kg > 0 ? t.gas.delta_kg : 0), 0);
   const gIn = journal.reduce((a, t) => a + (t.gas && t.gas.delta_kg < 0 ? -t.gas.delta_kg : 0), 0);
+  selectTrip(journal.some(t => t.id === selTrip) ? selTrip : journal[0]?.id);
   $("#jTotal").textContent = `Рейсов: ${journal.length} · Нетто по закрытым: ${kg(net)} кг` +
     (GAS.enabled && (gOut || gIn) ? ` · Газ слито: ${kg(gOut)} кг · залито: ${kg(gIn)} кг` : "");
 }
 $("#jLoad").onclick = loadJournal;
+
+// ---------------- фото рейса справа от журнала
+let selTrip = null;
+$("#jTable tbody").addEventListener("click", e => {
+  if (e.target.closest("button, a")) return;
+  const tr = e.target.closest("tr[data-trip]");
+  if (tr) selectTrip(+tr.dataset.trip);
+});
+async function selectTrip(id) {
+  selTrip = id;
+  $$("#jTable tbody tr").forEach(r => r.classList.toggle("sel", +r.dataset.trip === id));
+  const t = journal.find(x => x.id === id);
+  const side = $("#jSide");
+  if (!t) { side.innerHTML = `<div class="j-empty">Выберите рейс в таблице — здесь появятся фото с камер и взвешивания</div>`; return; }
+  const ws = await api(`/api/trips/${id}/weighings`);
+  if (selTrip !== id) return;
+  const kindTxt = { arrival: "приезд", departure: "убытие" };
+  const stText = { open: "открыт", closed: "закрыт", cancelled: "отменён" };
+  side.innerHTML = `
+    <h3><span>Рейс №${t.id}</span><span class="st-${t.status}">${stText[t.status]}</span></h3>
+    <div class="plates">${esc(pretty(t.plate) || "без номера")}${t.trailer ? `<span class="trl"> + ${esc(pretty(t.trailer))}</span>` : ""}</div>
+    ${t.status === "closed" ? `<div>Брутто ${kg(t.gross)} · Тара ${kg(t.tare)} · <b>Нетто ${kg(t.net)} кг</b></div>` : ""}
+    ${gasBox(t.gas, t)}
+    ${ws.map((w, i) => {
+      const files = w.snapshots.split(";").filter(Boolean);
+      const cams = files.filter(f => !f.endsWith("_plate.jpg")), crops = files.filter(f => f.endsWith("_plate.jpg"));
+      return `<div class="jw">
+        <div class="jw-head"><span><span class="jw-kind ${w.kind}">${kindTxt[w.kind] || (i ? "2-е взвеш." : "1-е взвеш.")}</span>
+          ${dt(w.ts)}</span><b>${kg(w.weight)} кг</b></div>
+        ${w.source === "driver" ? `<div class="muted src-driver">📱 водитель ${esc(w.operator)}</div>` : ""}
+        ${w.plate_seen && w.plate_seen !== w.plate ? `<div class="muted">камера видела: ${esc(pretty(w.plate_seen))}</div>` : ""}
+        <div class="jw-photos">${cams.map(f => `<img src="/snapshots/${esc(f)}" class="${cams.length === 1 ? "only" : ""}" loading="lazy" data-zoom>`).join("")}
+          ${crops.map(f => `<img src="/snapshots/${esc(f)}" class="crop" data-zoom>`).join("")}</div>
+        ${files.length ? "" : `<div class="muted">фото нет</div>`}
+      </div>`;
+    }).join("") || `<div class="muted">взвешиваний нет</div>`}
+    <div class="filters"><button data-edit="${t.id}">Изменить</button><a href="/ticket/${t.id}" target="_blank">Талон</a></div>`;
+}
+document.addEventListener("click", e => { if (e.target.matches("img[data-zoom], .snaps img")) { e.preventDefault(); zoom(e.target.src); } });
 $("#jXlsx").onclick = () => location.href = "/api/trips.xlsx?" + jQuery();
 
 // ---------------- редактирование рейса
@@ -207,7 +298,7 @@ document.addEventListener("click", async e => {
   const t = journal.find(x => x.id == id) || (await api("/api/trips?status=")).find(x => x.id == id);
   const f = $("#dlgForm");
   $("#dlgTitle").textContent = `Рейс №${t.id}`;
-  for (const k of ["plate", "cargo", "counterparty", "driver", "comment", "status"]) f.elements[k].value = t[k] ?? "";
+  for (const k of ["plate", "trailer", "cargo", "counterparty", "driver", "comment", "status"]) f.elements[k].value = t[k] ?? "";
   $("#dlgClose1").hidden = t.status !== "open";
   const ws = await api(`/api/trips/${t.id}/weighings`);
   const kindTxt = { arrival: "приезд", departure: "убытие" };
@@ -224,11 +315,11 @@ document.addEventListener("click", async e => {
     b.disabled = true;
   });
   $("#dlgSnaps").innerHTML = ws.flatMap(w => w.snapshots.split(";").filter(Boolean))
-    .map(s => `<a href="/snapshots/${s}" target="_blank"><img src="/snapshots/${s}"></a>`).join("");
+    .map(s => `<img src="/snapshots/${s}">`).join("");
   const dlg = $("#dlg");
   dlg.onclose = async () => {
     if (dlg.returnValue === "save") {
-      const body = Object.fromEntries(["plate", "cargo", "counterparty", "driver", "comment", "status"].map(k => [k, f.elements[k].value]));
+      const body = Object.fromEntries(["plate", "trailer", "cargo", "counterparty", "driver", "comment", "status"].map(k => [k, f.elements[k].value]));
       await api(`/api/trips/${t.id}`, body, "PATCH");
     } else if (dlg.returnValue === "close1") {
       const r = await api(`/api/trips/${t.id}/close`);
@@ -243,13 +334,14 @@ document.addEventListener("click", async e => {
 async function loadVehicles() {
   const vs = await api("/api/vehicles");
   $("#vTable tbody").innerHTML = vs.map(v => `
-    <tr><td><b>${esc(pretty(v.plate))}</b></td><td>${esc(v.model)}</td><td>${esc(v.counterparty)}</td>
+    <tr><td><b>${esc(pretty(v.plate))}</b></td><td><span class="kind-chip ${v.kind}">${{ trailer: "прицеп", tractor: "тягач" }[v.kind] || "одиночка"}</span></td><td>${esc(v.model)}</td><td>${esc(v.counterparty)}</td>
     <td>${esc(v.driver)}</td><td class="num">${kg(v.tare)}</td><td class="num">${kg(v.tank_l)}</td><td>${v.blocked ? "⛔" : ""}</td><td>${esc(v.comment)}</td>
     <td><button data-vedit='${esc(JSON.stringify(v))}'>Изменить</button> <button data-vdel="${esc(v.plate)}">Удалить</button></td></tr>`).join("");
   $$("[data-vedit]").forEach(b => b.onclick = () => {
     const v = JSON.parse(b.dataset.vedit), f = $("#vForm");
-    for (const k of ["plate", "model", "counterparty", "driver", "tare", "tank_l", "comment"]) f.elements[k].value = v[k] ?? "";
+    for (const k of ["kind", "plate", "model", "counterparty", "driver", "tare", "tank_l", "comment"]) f.elements[k].value = v[k] ?? "";
     f.elements.blocked.checked = !!v.blocked;
+    f.scrollIntoView({ behavior: "smooth", block: "start" });
   });
   $$("[data-vdel]").forEach(b => b.onclick = async () => {
     if (confirm("Удалить " + b.dataset.vdel + "?")) { await api("/api/vehicles/" + encodeURIComponent(b.dataset.vdel), {}, "DELETE"); loadVehicles(); }
@@ -263,6 +355,7 @@ $("#vForm").onsubmit = async e => {
   v.tare = v.tare ? +v.tare : null;
   v.tank_l = v.tank_l ? +v.tank_l : null;
   await api("/api/vehicles", v);
+  loadPlateHints();
   f.reset();
   loadVehicles();
 };

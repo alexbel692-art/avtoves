@@ -41,6 +41,7 @@ class WeighingController:
         self.empty_since: float | None = None
         self.side_in: str | None = None
         self.plate_override: str | None = None   # номер, введённый оператором
+        self.trailer_override = ""               # прицеп, указанный оператором или водителем
         self.last_result: dict | None = None
         self.fixed_log: deque[tuple[str, float]] = deque(maxlen=20)   # (номер, время фиксации)
         self.fixed_cand: dict | None = None
@@ -63,10 +64,14 @@ class WeighingController:
     def request_fix(self):
         self._fix_request = True
 
-    def set_plate(self, text: str):
+    def set_plate(self, text: str, trailer: str | None = None):
         plate, _ = normalize(text)
-        self.plate_override = plate or None
-        self.event(f"Оператор указал номер: {plate or '—'}")
+        if plate or trailer is None:
+            self.plate_override = plate or None
+        if trailer is not None:
+            self.trailer_override = normalize(trailer)[0] if trailer else ""
+        tr = f" + прицеп {self.trailer_override}" if self.trailer_override else ""
+        self.event(f"Оператор указал номер: {self.plate_override or '—'}{tr}")
 
     def reset(self):
         """Сбросить цикл (например, машина уехала с весов не по правилам)."""
@@ -162,12 +167,14 @@ class WeighingController:
         snaps = self._save_snapshots(cand.get("crop"))
         res = self.db.add_weighing(plate, cand.get("conf"), weight, self.side_in or cand.get("side"),
                                    auto, ";".join(snaps), int(self.wcfg["trip_max_hours"]),
-                                   kind=direction, source=source, driver=driver, plate_seen=plate_seen)
+                                   kind=direction, source=source, driver=driver, plate_seen=plate_seen,
+                                   trailer=self.trailer_override)
         trip = res["trip"]
         kind = "второе" if trip["status"] == "closed" else "первое"
         who = f" — водитель {driver['name']}" if driver else ""
         what = {"arrival": "приезд", "departure": "убытие"}.get(direction, f"{kind} взвешивание")
-        msg = f"Зафиксировано {weight:.0f} кг, номер {plate or 'НЕ РАСПОЗНАН'} ({what}){who}"
+        tr = f" + {self.trailer_override}" if self.trailer_override else ""
+        msg = f"Зафиксировано {weight:.0f} кг, номер {plate or 'НЕ УКАЗАН'}{tr} ({what}){who}"
         if trip["status"] == "closed":
             msg += f", нетто {trip['net']:.0f} кг"
         self.event(msg)
@@ -176,13 +183,13 @@ class WeighingController:
             self.event(f"ВНИМАНИЕ: ТС {plate} в стоп-листе")
         self.fixed_log.append((plate, time.time()))
         self.fixed_cand = {**cand, "plate": plate} if plate else None
-        self.last_result = {**res, "plate": plate, "weight": weight, "snapshots": snaps,
+        self.last_result = {**res, "plate": plate, "trailer": self.trailer_override, "weight": weight, "snapshots": snaps,
                             "kind": kind, "ts": datetime.now().isoformat(timespec="seconds")}
         self._set_state(FIXED)
         self._lights_exit()
 
     # ------------------------------------------------------------ кнопка водителя
-    def fix_by_driver(self, driver: dict, plate: str, direction: str, wait_sec: float = 25) -> dict:
+    def fix_by_driver(self, driver: dict, plate: str, direction: str, wait_sec: float = 25, trailer: str = "") -> dict:
         """Водитель нажал «Приехал»/«Уехал». Ждём, пока машина встанет и вес успокоится,
         проверяем номер камерой и записываем. Возвращает результат или бросает DriverError."""
         deadline = time.time() + wait_sec
@@ -209,6 +216,7 @@ class WeighingController:
                             raise DriverError(f"камера видит на весах другой номер: {seen}. "
                                               f"Проверьте, что выбрана ваша машина ({plate})")
                         self.plate_override = plate
+                        self.trailer_override = trailer
                         self._fix(w, auto=False, source="driver", direction=direction, driver=driver,
                                   plate_seen=seen)
                         return dict(self.last_result)
@@ -264,6 +272,7 @@ class WeighingController:
         self._set_state(FREE)
         self.free_since = time.time()
         self.plate_override = None
+        self.trailer_override = ""
         self.side_in = None
         self.empty_since = None
         self._fix_request = False
@@ -285,7 +294,7 @@ class WeighingController:
             "auto_fix": self.wcfg["auto_fix"] and not self.wcfg.get("driver_mode"),
             "driver_mode": bool(self.wcfg.get("driver_mode")), "mode": self.wcfg["mode"],
             "plate": {k: v for k, v in (cand or {}).items() if k != "crop"} if cand else None,
-            "plate_override": self.plate_override,
+            "plate_override": self.plate_override, "trailer_override": self.trailer_override,
             "last": {k: v for k, v in (self.last_result or {}).items()} if self.last_result else None,
             "events": list(self.events)[:20],
         }

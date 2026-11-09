@@ -6,16 +6,18 @@
 <title>АвтоВес — вход</title>
 <link rel="icon" href="/static/favicon.ico">
 <style>
-  :root { --bg:#121417; --panel:#1b1f24; --line:#2e343d; --text:#e6e8eb; --muted:#8a929e; --accent:#f2a900; --bad:#e5484d; }
+  :root { --bg:#0e1622; --panel:#16202f; --line:#26344a; --text:#e8edf5; --muted:#8c9ab0; --accent:#f5a524; --bad:#e5484d; --primary:#2f7cf6; }
   * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 "Segoe UI", system-ui, sans-serif; }
+  html, body { height: 100%; margin: 0; background: radial-gradient(80% 60% at 50% 0%, #1b2a42, var(--bg)); color: var(--text); font: 15px/1.4 "Segoe UI", system-ui, sans-serif; }
   body { display: grid; place-items: center; padding: 16px; }
-  form { width: min(360px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px; }
-  h1 { margin: 0 0 4px; color: var(--accent); font-size: 26px; }
+  form { width: min(370px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 30px; box-shadow: 0 20px 60px rgba(0,0,0,.4); }
+  h1 { margin: 0 0 4px; color: #fff; font-size: 24px; display: flex; align-items: center; gap: 12px; }
+  h1::before { content: ""; width: 38px; height: 38px; border-radius: 10px; flex: none;
+    background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23111' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M3 18h18M5 18v-4h14v4M12 14V5M7 8l5-3 5 3'/%3E%3C/svg%3E") center/24px no-repeat; }
   .muted { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
   input, button { font: inherit; width: 100%; border-radius: 8px; padding: 12px 14px; }
   input { background: var(--bg); color: var(--text); border: 1px solid var(--line); font-size: 17px; }
-  button { margin-top: 14px; border: 0; background: var(--accent); color: #111; font-weight: 600; cursor: pointer; }
+  button { margin-top: 14px; border: 0; background: var(--primary); color: #fff; font-weight: 600; cursor: pointer; }
   .err { color: var(--bad); min-height: 20px; margin-top: 10px; font-size: 14px; }
 </style>
 </head>

@@ -66,11 +66,14 @@ CREATE TABLE IF NOT EXISTS drivers (
 
 # Колонки, добавленные после первой версии (старые базы дополняются при запуске)
 MIGRATIONS = {
-    "trips": {"gas_tare": "REAL", "gas_in": "REAL", "gas_out": "REAL", "driver_id": "INTEGER"},
+    "trips": {"gas_tare": "REAL", "gas_in": "REAL", "gas_out": "REAL", "driver_id": "INTEGER",
+              "trailer": "TEXT NOT NULL DEFAULT ''"},
     # source: auto / operator / driver;  kind: arrival (приехал) / departure (уехал) / ''
     "weighings": {"source": "TEXT NOT NULL DEFAULT ''", "kind": "TEXT NOT NULL DEFAULT ''",
-                  "driver_id": "INTEGER", "plate_seen": "TEXT NOT NULL DEFAULT ''"},
-    "vehicles": {"tank_l": "REAL"},
+                  "driver_id": "INTEGER", "plate_seen": "TEXT NOT NULL DEFAULT ''",
+                  "trailer": "TEXT NOT NULL DEFAULT ''"},
+    # kind: '' — одиночка (в т.ч. с бочками на борту), tractor — тягач (ездит с прицепом), trailer — прицеп/полуприцеп
+    "vehicles": {"tank_l": "REAL", "kind": "TEXT NOT NULL DEFAULT ''"},
 }
 
 
@@ -105,7 +108,7 @@ class DB:
     # ---------------------------------------------------------- взвешивание
     def add_weighing(self, plate: str, conf: float | None, weight: float, side_in: str | None,
                      auto: bool, snapshots: str, trip_hours: int, *, kind: str = "", source: str = "",
-                     driver: dict | None = None, plate_seen: str = "") -> dict:
+                     driver: dict | None = None, plate_seen: str = "", trailer: str = "") -> dict:
         """Сохраняет взвешивание и связывает его с рейсом.
         kind='' — первое/второе определяется само (есть открытый рейс этой машины → закрываем);
         kind='arrival' — «приехал на базу»: всегда новый рейс;
@@ -113,9 +116,9 @@ class DB:
         ts = now_iso()
         wid = self.x(
             "INSERT INTO weighings(ts,plate,plate_conf,weight,side_in,auto,snapshots,source,kind,driver_id,"
-            "plate_seen,operator) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "plate_seen,operator,trailer) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ts, plate, conf, weight, side_in, int(auto), snapshots, source, kind,
-             (driver or {}).get("id"), plate_seen, (driver or {}).get("name", "")))
+             (driver or {}).get("id"), plate_seen, (driver or {}).get("name", ""), trailer))
         trip = None
         if plate and kind != "arrival":
             since = (datetime.now() - timedelta(hours=trip_hours)).isoformat(timespec="seconds")
@@ -126,17 +129,17 @@ class DB:
             w1 = trip["w1"]
             gross, tare = max(w1, weight), min(w1, weight)
             self.x("UPDATE trips SET w2_id=?,w2_ts=?,w2=?,gross=?,tare=?,net=?,direction=?,"
-                   "status='closed',updated=? WHERE id=?",
+                   "status='closed',updated=?,trailer=CASE WHEN trailer='' THEN ? ELSE trailer END WHERE id=?",
                    (wid, ts, weight, gross, tare, gross - tare, "in" if w1 >= weight else "out",
-                    now_iso(), trip["id"]))
+                    now_iso(), trailer, trip["id"]))
             tid = trip["id"]
         else:
             veh = self.vehicle(plate) if plate else None
             drv_name = (driver or {}).get("name") or (veh or {}).get("driver", "")
             comment = "убытие без отметки приезда" if kind == "departure" else ""
-            tid = self.x("INSERT INTO trips(plate,w1_id,w1_ts,w1,counterparty,driver,driver_id,comment,updated) "
-                         "VALUES(?,?,?,?,?,?,?,?,?)",
-                         (plate, wid, ts, weight, (veh or {}).get("counterparty", ""),
+            tid = self.x("INSERT INTO trips(plate,trailer,w1_id,w1_ts,w1,counterparty,driver,driver_id,comment,updated) "
+                         "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                         (plate, trailer, wid, ts, weight, (veh or {}).get("counterparty", ""),
                           drv_name, (driver or {}).get("id"), comment, now_iso()))
         self.x("UPDATE weighings SET trip_id=? WHERE id=?", (tid, wid))
         self.recalc_gas(tid)
@@ -152,8 +155,7 @@ class DB:
             return
         tare = t.get("gas_tare")
         if tare is None or force:
-            veh = self.vehicle(t["plate"]) if t["plate"] else None
-            tare = (veh or {}).get("tare")
+            tare = self.combo_tare(t["plate"], t.get("trailer") or "")
         if not tare:
             self.x("UPDATE trips SET gas_tare=NULL,gas_in=NULL,gas_out=NULL WHERE id=?", (tid,))
             return
@@ -161,26 +163,66 @@ class DB:
         g_out = round(t["w2"] - tare, 1) if t["w2"] is not None else None
         self.x("UPDATE trips SET gas_tare=?,gas_in=?,gas_out=? WHERE id=?", (tare, g_in, g_out, tid))
 
+    def combo_tare(self, plate: str, trailer: str = "") -> float | None:
+        """Тара пустой сцепки: машина (тягач) + прицеп. Нет тары хоть одного — газ не считается."""
+        veh = self.vehicle(plate) if plate else None
+        tare = (veh or {}).get("tare")
+        if not tare:
+            return None
+        if trailer:
+            tr = (self.vehicle(trailer) or {}).get("tare")
+            if not tr:
+                return None
+            tare += tr
+        return tare
+
+    def tank_volume(self, plate: str, trailer: str = "") -> float | None:
+        """Объём цистерны: у прицепа (полуприцеп-цистерна) или у одиночной машины."""
+        for p in ([trailer] if trailer else []) + [plate]:
+            v = (self.vehicle(p) or {}).get("tank_l") if p else None
+            if v:
+                return v
+        return None
+
     def set_tare_from_weighing(self, wid: int) -> dict:
-        """«Это пустая машина»: вес взвешивания становится тарой ТС в справочнике."""
+        """«Это пустая машина»: вес взвешивания становится тарой в справочнике.
+        Со сцепкой: если известна тара тягача — запоминаем тару прицепа (и наоборот)."""
         w = self.q("SELECT * FROM weighings WHERE id=?", (wid,))
         if not w or not w[0]["plate"]:
             raise ValueError("у взвешивания нет номера ТС")
         w = w[0]
-        veh = self.vehicle(w["plate"]) or {"plate": w["plate"]}
-        veh["tare"] = w["weight"]
+        trailer = w.get("trailer") or (self.trip(w["trip_id"]) or {}).get("trailer", "") if w["trip_id"] else ""
+        if trailer:
+            truck_tare = (self.vehicle(w["plate"]) or {}).get("tare")
+            trailer_tare = (self.vehicle(trailer) or {}).get("tare")
+            if truck_tare:
+                target, value = trailer, w["weight"] - truck_tare
+            elif trailer_tare:
+                target, value = w["plate"], w["weight"] - trailer_tare
+            else:
+                raise ValueError(f"это взвешивание сцепки {w['plate']} + {trailer}: укажите в справочнике тару "
+                                 "тягача или прицепа — вторую программа посчитает сама")
+            if value <= 0:
+                raise ValueError("получается отрицательная тара — проверьте тару в справочнике")
+            veh = self.vehicle(target) or {"plate": target, "kind": "trailer" if target == trailer else ""}
+            veh["tare"] = round(value, 1)
+        else:
+            target = w["plate"]
+            veh = self.vehicle(target) or {"plate": target}
+            veh["tare"] = w["weight"]
         self.save_vehicle(veh)
-        # рейсы этой машины без расчёта газа — досчитываем
-        for t in self.q("SELECT id FROM trips WHERE plate=? AND (gas_tare IS NULL OR id=?)", (w["plate"], w["trip_id"])):
+        # рейсы без расчёта газа — досчитываем (и тот, по которому нажали)
+        for t in self.q("SELECT id FROM trips WHERE (plate=? OR trailer=?) AND (gas_tare IS NULL OR id=?)",
+                        (target, target, w["trip_id"])):
             self.recalc_gas(t["id"], force=True)
-        return self.vehicle(w["plate"])
+        return self.vehicle(target)
 
     def trip(self, tid: int) -> dict | None:
         r = self.q("SELECT * FROM trips WHERE id=?", (tid,))
         return r[0] if r else None
 
     def update_trip(self, tid: int, fields: dict) -> dict | None:
-        allowed = {"plate", "cargo", "counterparty", "driver", "comment", "status"}
+        allowed = {"plate", "trailer", "cargo", "counterparty", "driver", "comment", "status"}
         f = {k: v for k, v in fields.items() if k in allowed}
         if not f:
             return self.trip(tid)
@@ -190,6 +232,9 @@ class DB:
         self.x(f"UPDATE trips SET {sets} WHERE id=?", (*f.values(), tid))
         if "plate" in f:
             self.x("UPDATE weighings SET plate=? WHERE trip_id=?", (f["plate"], tid))
+        if "trailer" in f:
+            self.x("UPDATE weighings SET trailer=? WHERE trip_id=?", (f["trailer"], tid))
+        if "plate" in f or "trailer" in f:
             self.recalc_gas(tid, force=True)
         return self.trip(tid)
 
@@ -214,7 +259,7 @@ class DB:
         if date_to:
             sql += " AND w1_ts<?"; args.append(date_to)
         if plate:
-            sql += " AND plate LIKE ?"; args.append(f"%{plate.upper()}%")
+            sql += " AND (plate LIKE ? OR trailer LIKE ?)"; args += [f"%{plate.upper()}%"] * 2
         if status:
             sql += " AND status=?"; args.append(status)
         sql += " ORDER BY id DESC LIMIT ?"; args.append(limit)
@@ -249,17 +294,21 @@ class DB:
         return self.q("SELECT * FROM vehicles ORDER BY plate")
 
     def save_vehicle(self, v: dict):
-        v = {"model": "", "counterparty": "", "driver": "", "tare": None, "tank_l": None, "blocked": 0, "comment": "", **v}
+        v = {"model": "", "counterparty": "", "driver": "", "tare": None, "tank_l": None, "blocked": 0,
+             "comment": "", "kind": "", **v}
+        v["kind"] = v.get("kind") if v.get("kind") in ("tractor", "trailer") else ""
         old = self.vehicle(v["plate"])
-        self.x("INSERT INTO vehicles(plate,model,counterparty,driver,tare,tank_l,blocked,comment) "
-               "VALUES(:plate,:model,:counterparty,:driver,:tare,:tank_l,:blocked,:comment) "
+        self.x("INSERT INTO vehicles(plate,model,counterparty,driver,tare,tank_l,blocked,comment,kind) "
+               "VALUES(:plate,:model,:counterparty,:driver,:tare,:tank_l,:blocked,:comment,:kind) "
                "ON CONFLICT(plate) DO UPDATE SET model=excluded.model,counterparty=excluded.counterparty,"
                "driver=excluded.driver,tare=excluded.tare,tank_l=excluded.tank_l,blocked=excluded.blocked,"
-               "comment=excluded.comment",
-               {k: v[k] for k in ("plate", "model", "counterparty", "driver", "tare", "tank_l", "blocked", "comment")})
-        # тару указали впервые — досчитываем газ по рейсам этой машины, где его ещё нет
+               "comment=excluded.comment,kind=excluded.kind",
+               {k: v[k] for k in ("plate", "model", "counterparty", "driver", "tare", "tank_l", "blocked", "comment",
+                                  "kind")})
+        # тару указали впервые — досчитываем газ по рейсам с этой машиной или прицепом, где его ещё нет
         if v["tare"] and (not old or not old.get("tare")):
-            for t in self.q("SELECT id FROM trips WHERE plate=? AND gas_tare IS NULL", (v["plate"],)):
+            for t in self.q("SELECT id FROM trips WHERE (plate=? OR trailer=?) AND gas_tare IS NULL",
+                            (v["plate"], v["plate"])):
                 self.recalc_gas(t["id"])
 
     # ---------------------------------------------------------- водители
