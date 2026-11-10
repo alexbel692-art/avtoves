@@ -326,14 +326,21 @@ def test_scale(conn: dict, parser: str, seconds: float = 4.0) -> dict:
             close = sock.close
     except Exception as ex:  # noqa: BLE001
         return {"ok": False, "message": f"нет подключения: {ex}"}
-    buf = b""
+    from .scale import describe_raw, looks_like_garbage, normalize, split_frames
+    buf = raw = b""
     try:
         while time.time() - t0 < seconds and len(lines) < 8:
-            buf += read()
-            *ls, buf = re.split(rb"\r\n|\n|\r", buf)
+            chunk = read()
+            raw = (raw + chunk)[-256:]
+            buf += normalize(chunk)
+            ls, buf = split_frames(buf)
             lines += [ln.decode("latin-1", "replace") for ln in ls if ln.strip()]
     finally:
         close()
+    if not lines and raw:
+        msg = ("приходят байты, но это «мусор» — скорость не совпадает с индикатором (F28)" if looks_like_garbage(raw)
+               else "приходят байты, но посылки не найдены — пришлите разработчику снимок строк ниже")
+        return {"ok": False, "message": msg, "lines": ["— сырые байты —", *describe_raw(raw).splitlines()]}
     if not lines:
         return {"ok": False, "message": "подключение есть, но индикатор ничего не присылает "
                                         "(включите непрерывную передачу на индикаторе и проверьте скорость порта в NPort)",
@@ -341,8 +348,8 @@ def test_scale(conn: dict, parser: str, seconds: float = 4.0) -> dict:
     parsed = [parse(ln.encode("latin-1")) for ln in lines]
     good = [p for p in parsed if p and (p.weight is not None or p.overload)]
     if not good:
-        return {"ok": False, "message": "данные приходят, но формат не распознан — попробуйте формат «другой»",
-                "lines": lines[-5:]}
+        return {"ok": False, "message": "данные приходят, но формат не распознан — пришлите разработчику снимок строк ниже",
+                "lines": lines[-3:] + ["— сырые байты —", *describe_raw(raw).splitlines()]}
     last = good[-1]
     return {"ok": True, "message": f"вес {last.weight:.0f} кг" + (" (стабилен)" if last.stable else "")
             if last.weight is not None else "перегруз", "lines": lines[-5:]}

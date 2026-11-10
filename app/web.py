@@ -397,8 +397,16 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
             return {"ok": False, "message": "подключение к NPort есть, но индикатор ничего не присылает "
                                             "(включите непрерывную передачу на индикаторе, проверьте скорость "
                                             "или поставьте нуль-модемный переходник)"}
-        return {"ok": False, "message": f"за {seconds:.0f} с пришло {got} байт, но формат не распознан — "
-                                        "попробуйте формат «другой»", "lines": lines}
+        from .scale import describe_raw, looks_like_garbage
+        tail = sc.rx_tail
+        if looks_like_garbage(tail):
+            msg = (f"за {seconds:.0f} с пришло {got} байт, но это «мусор» — скорость не совпадает. "
+                   "Поставьте в NPort (Serial Settings) ту же скорость, что в индикаторе (F28: 4 = 9600), "
+                   "или попробуйте 4800 / 19200")
+        else:
+            msg = (f"за {seconds:.0f} с пришло {got} байт, но формат не распознан. "
+                   "Пришлите разработчику снимок строк ниже")
+        return {"ok": False, "message": msg, "lines": lines[-3:] + ["— сырые байты —", *describe_raw(tail).splitlines()]}
 
     async def settings_test(request: Request):
         if not _settings_ok(request):

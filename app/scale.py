@@ -37,6 +37,7 @@ def parse_cas(line: bytes, data_len: int = 8) -> Reading | None:
     s = line.strip(b"\r\n\x00")
     if len(s) < 6:
         return None
+    s = normalize(s)
     raw = s.decode("latin-1", "replace")
     head = s[:6].upper()
     status = head[:2]
@@ -79,6 +80,45 @@ def parse_generic(line: bytes, data_len: int = 8) -> Reading | None:
     if w is None:
         return None
     return Reading(w, True, False, False, s.decode("latin-1", "replace"))
+
+
+_HDR_RE = re.compile(rb"(?=(?:ST|US|OL),(?:GS|NT),)")
+_FRAME_END = re.compile(rb"\r\n|\n|\r")
+
+
+def normalize(chunk: bytes) -> bytes:
+    """Индикатор шлёт только ASCII. Если в индикаторе 7 бит + чётность, а в NPort 8 бит без чётности,
+    бит чётности приходит старшим битом байта — убираем его."""
+    if any(b >= 0x80 for b in chunk):
+        return bytes(b & 0x7F for b in chunk)
+    return chunk
+
+
+def split_frames(buf: bytes) -> tuple[list[bytes], bytes]:
+    """Режем поток на посылки: по концу строки, а если его нет — по заголовку ST,GS / US,GS / OL,GS."""
+    *lines, rest = _FRAME_END.split(buf)
+    if lines:
+        return lines, rest
+    parts = [p for p in _HDR_RE.split(rest) if p]
+    if len(parts) >= 2:
+        return parts[:-1], parts[-1]
+    return [], rest
+
+
+def describe_raw(data: bytes) -> str:
+    """Текст + HEX последних байт — для диагностики."""
+    tail = data[-48:]
+    text = "".join(chr(b) if 32 <= b < 127 else "·" for b in tail)
+    return f"{text}\nHEX: {tail.hex(' ').upper()}"
+
+
+def looks_like_garbage(data: bytes) -> bool:
+    """Мусор при несовпадении скорости: мало цифр и букв даже после снятия старшего бита."""
+    d = normalize(data[-200:])
+    if len(d) < 20:
+        return False
+    good = sum(1 for b in d if 48 <= b <= 57 or 65 <= b <= 90 or 97 <= b <= 122 or b in b" ,.+-\r\n")
+    return good / len(d) < 0.7
 
 
 def _to_number(b: bytes) -> float | None:
@@ -154,6 +194,7 @@ class Scale:
         self.connected = False
         self.link = False          # соединение с NPort / COM-портом открыто
         self.rx_bytes = 0          # сколько байт пришло от индикатора
+        self.rx_tail = b""         # последние байты как пришли — для диагностики
         self.error = ""
         self._stop = threading.Event()
         self._thr = threading.Thread(target=self._run, name="scale", daemon=True)
@@ -180,8 +221,9 @@ class Scale:
                     chunk = tr.read()
                     if chunk:
                         self.rx_bytes += len(chunk)
-                        buf += chunk
-                        *lines, buf = re.split(rb"\r\n|\n|\r", buf)
+                        self.rx_tail = (self.rx_tail + chunk)[-256:]
+                        buf += normalize(chunk)
+                        lines, buf = split_frames(buf)
                         for ln in lines:
                             self._handle(ln)
                         if len(buf) > 4096:
