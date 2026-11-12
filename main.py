@@ -25,7 +25,7 @@ from app import __version__  # noqa: E402
 
 from app.config import load_config  # noqa: E402
 from app.runtime import Runtime  # noqa: E402
-from app.web import build_app  # noqa: E402
+from app.web import build_app, build_public_app  # noqa: E402
 
 
 def setup_logging(data_dir: str):
@@ -52,8 +52,21 @@ def main():
     ctx = Runtime(cfg, force_simulate=args.simulate)
     logging.info("АвтоВес %s запущен: http://%s:%s (настройки: %s)", __version__,
                  cfg["server"]["host"], cfg["server"]["port"], cfg.get("_path"))
-    uvicorn.run(build_app(ctx), host=cfg["server"]["host"], port=int(cfg["server"]["port"]),
-                log_level="warning")
+    main_port, public_port = int(cfg["server"]["port"]), int(cfg["server"].get("public_port") or 0)
+    if public_port and public_port != main_port:
+        import threading
+
+        def serve_public():
+            # Внешний порт не должен ронять весовую: если он занят, работаем без него
+            try:
+                uvicorn.run(build_public_app(ctx), host=cfg["server"]["host"], port=public_port,
+                            log_level="warning", proxy_headers=True, forwarded_allow_ips="*")
+            except BaseException:  # noqa: BLE001
+                logging.exception("Внешний порт %s не запущен", public_port)
+
+        threading.Thread(target=serve_public, name="public", daemon=True).start()
+        logging.info("Внешний порт (приложение водителя, кабинет логиста): %s", public_port)
+    uvicorn.run(build_app(ctx), host=cfg["server"]["host"], port=main_port, log_level="warning")
 
 
 if __name__ == "__main__":

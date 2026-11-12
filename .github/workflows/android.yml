@@ -1,0 +1,56 @@
+name: АвтоВес Водитель — APK
+
+on:
+  push:
+    branches: [main, v2]
+    paths: ['android/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      # Постоянный ключ подписи лежит в секретах репозитория (сам репозиторий открытый).
+      # Без него собирается только пробная версия: обновления поверх неё потом не установятся.
+      - name: Ключ подписи
+        id: key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "task=assembleRelease" >> "$GITHUB_OUTPUT"
+            echo "apk=android/app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
+            echo "name=AvtoVes-Voditel-apk" >> "$GITHUB_OUTPUT"
+            echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Нет секрета ANDROID_KEYSTORE_B64 — собрана пробная версия с временным ключом"
+            echo "task=assembleDebug" >> "$GITHUB_OUTPUT"
+            echo "apk=android/app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
+            echo "name=AvtoVes-Voditel-PROBNAYA-apk" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Сборка
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          VERSION_CODE: ${{ github.run_number }}
+          TASK: ${{ steps.key.outputs.task }}
+        run: gradle --no-daemon "$TASK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.name }}
+          path: ${{ steps.key.outputs.apk }}

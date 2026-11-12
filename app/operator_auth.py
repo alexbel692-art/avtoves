@@ -19,8 +19,9 @@ COOKIE = "avtoves_op"
 DAYS = 30
 
 # Без пароля оператора доступны только эти адреса
-PUBLIC_EXACT = {"/login", "/api/op/login", "/api/op/status", "/api/ping", "/driver"}
-PUBLIC_PREFIX = ("/static/", "/api/driver/", "/api/1c/")
+PUBLIC_EXACT = {"/login", "/api/op/login", "/api/op/status", "/api/ping", "/driver", "/logist"}
+# /api/app/ и /api/logist/ защищены своими логином и паролем
+PUBLIC_PREFIX = ("/static/", "/api/driver/", "/api/1c/", "/api/app/", "/api/logist/")
 
 
 class OperatorAuth:

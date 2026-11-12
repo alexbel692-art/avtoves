@@ -5,3 +5,10 @@ build/stage/
 build/cache/
 dist/
 .venv/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.jks
+tests/shots/
+.pytest_cache/

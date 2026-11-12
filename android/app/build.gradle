@@ -1,0 +1,44 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Ключ подписи не хранится в репозитории: сборка на GitHub берёт его из секретов.
+def keystoreFile = System.getenv('ANDROID_KEYSTORE_FILE')
+
+android {
+    namespace 'ru.avtoves.driver'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'ru.avtoves.driver'
+        minSdk 26
+        targetSdk 34
+        versionCode((System.getenv('VERSION_CODE') ?: '1') as int)
+        versionName '2.0'
+    }
+
+    signingConfigs {
+        release {
+            if (keystoreFile) {
+                storeFile file(keystoreFile)
+                storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                keyAlias 'avtoves'
+                keyPassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (keystoreFile) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

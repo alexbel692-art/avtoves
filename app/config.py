@@ -11,7 +11,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULTS = {
     "simulate": False,
-    "server": {"host": "0.0.0.0", "port": 8780, "api_token": ""},
+    # public_port — внешний порт для интернета (приложение водителя и кабинет логиста); 0 — выключен
+    "server": {"host": "0.0.0.0", "port": 8780, "api_token": "", "public_port": 8790},
+    # сверка выгрузок с весами: расхождение больше tolerance_pct % (но не меньше tolerance_l литров) — уведомление
+    "logist": {"tolerance_pct": 2, "tolerance_l": 100},
     "data_dir": "data",
     "scale": {
         "connection": "tcp://127.0.0.1:4001", "parser": "cas", "data_len": 8,

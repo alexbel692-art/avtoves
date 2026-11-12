@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>АвтоВес: логист</title>
+<style>
+:root { --bg:#e6ebef; --paper:#fff; --ink:#101b25; --muted:#51606d; --line:#b7c1ca; --accent:#0b5cad; --accent-d:#084a8c; --bad:#b3261e; --ok:#14663c; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.4 "Segoe UI",Roboto,"Noto Sans",system-ui,sans-serif; }
+main { max-width:1200px; margin:0 auto; padding:16px 16px 50px; }
+header { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; margin-bottom:16px; }
+h1 { font-size:21px; margin:0 auto 0 0; }
+h2 { font-size:17px; margin:0 0 8px; }
+nav { display:flex; flex-wrap:wrap; gap:4px; }
+button,input,select { font:inherit; color:inherit; min-height:38px; border-radius:5px; }
+button { background:#fff; border:1px solid var(--ink); padding:4px 12px; cursor:pointer; font-weight:600; }
+button.primary { background:var(--accent); border-color:var(--accent-d); color:#fff; }
+button[aria-current="page"] { background:var(--ink); color:#fff; }
+input,select { background:#fff; border:1px solid var(--line); padding:4px 8px; max-width:100%; }
+:focus-visible { outline:3px solid #f0a000; outline-offset:1px; }
+label { display:flex; flex-direction:column; gap:3px; font-size:13px; font-weight:600; }
+.controls { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:14px; }
+.figures { font-size:18px; margin:0 0 14px; }
+.figures b { font-size:34px; font-weight:800; font-variant-numeric:tabular-nums; }
+.columns { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; margin-bottom:18px; }
+.scroll { overflow-x:auto; }
+table { width:100%; border-collapse:collapse; background:var(--paper); }
+th,td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--line); vertical-align:middle; }
+th { font-size:13px; background:#eef1f4; }
+td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+tr.off td { color:var(--muted); }
+.bad { color:var(--bad); font-weight:700; }
+.good { color:var(--ok); font-weight:600; }
+.actions { display:flex; gap:6px; flex-wrap:wrap; }
+.actions button { min-height:32px; padding:2px 9px; font-weight:500; }
+.error { color:var(--bad); font-weight:600; min-height:1.3em; margin:8px 0; }
+.login { max-width:360px; margin:10vh auto; background:#fff; padding:22px; border:1px solid var(--ink); display:flex; flex-direction:column; gap:10px; }
+dialog { border:1px solid var(--ink); border-radius:8px; padding:18px; width:min(440px,calc(100vw - 32px)); }
+dialog form { display:flex; flex-direction:column; gap:10px; }
+dialog h2 { margin:0; }
+.row-end { display:flex; gap:8px; justify-content:flex-end; margin-top:6px; }
+.empty { color:var(--muted); padding:10px 0; }
+section { margin-bottom:22px; }
+.note { margin:0 0 10px; }
+small { color:var(--muted); }
+</style>
+</head>
+<body>
+<main id="view"></main>
+<dialog id="dlg"></dialog>
+<script>
+'use strict';
+const view = document.getElementById('view');
+const dlg = document.getElementById('dlg');
+let token = null;
+try { token = localStorage.getItem('av.logist'); } catch (e) {}
+let tab = 'notices';
+let me = null;
+let refs = null;
+let invoiceView = 'pending';
+const pad = (n) => String(n).padStart(2, '0');
+const today = (() => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; })();
+const filter = { from: today, to: today, driver_id: '', client_id: '', plate: '' };
+const legFilter = { from: (() => { const d = new Date(Date.now() - 6 * 864e5); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; })(), to: today };
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) node.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of children.flat(Infinity)) {
+    if (c !== null && c !== undefined && c !== false) node.append(c.nodeType ? c : document.createTextNode(String(c)));
+  }
+  return node;
+}
+const fmt = (v) => (v === null || v === undefined ? '' : Number(v).toLocaleString('ru-RU', { maximumFractionDigits: 2 }));
+const when = (s) => (s ? s.slice(8, 10) + '.' + s.slice(5, 7) + '.' + s.slice(0, 4) + ' ' + s.slice(11, 16) : '');
+
+async function api(path, method, body) {
+  const resp = await fetch(path, {
+    method: method || 'GET',
+    headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (resp.status === 401 && token && !path.endsWith('/login')) {
+    setToken(null); render();
+    throw new Error('Войдите заново');
+  }
+  const type = resp.headers.get('Content-Type') || '';
+  const payload = type.includes('json') ? await resp.json() : resp;
+  if (!resp.ok) throw new Error(payload.error || 'Ошибка сервера ' + resp.status);
+  return payload;
+}
+function setToken(value) {
+  token = value;
+  try { value ? localStorage.setItem('av.logist', value) : localStorage.removeItem('av.logist'); } catch (e) {}
+}
+
+function form(title, fields, submitText, onSubmit) {
+  const error = el('div', { class: 'error', role: 'alert' });
+  const inputs = {};
+  const body = fields.map((f) => {
+    let input;
+    if (f.options) {
+      input = el('select', { name: f.name }, f.options.map((o) => el('option', { value: o.value, selected: String(o.value) === String(f.value ?? '') }, o.label)));
+    } else {
+      input = el('input', { name: f.name, type: f.type || 'text', value: f.value ?? '', inputmode: f.inputmode, autocomplete: f.type === 'password' ? 'new-password' : 'off', maxlength: f.maxlength });
+    }
+    inputs[f.name] = input;
+    return el('label', null, f.label, input);
+  });
+  dlg.replaceChildren(el('form', {
+    onsubmit: async (event) => {
+      event.preventDefault();
+      const values = {};
+      for (const [k, input] of Object.entries(inputs)) values[k] = input.value;
+      try { await onSubmit(values); dlg.close(); render(); }
+      catch (err) { error.textContent = err.message; }
+    },
+  }, el('h2', null, title), body, error,
+  el('div', { class: 'row-end' },
+    el('button', { type: 'button', onclick: () => dlg.close() }, 'Отмена'),
+    el('button', { type: 'submit', class: 'primary' }, submitText))));
+  dlg.showModal();
+}
+function confirmBox(text, yes, action) {
+  const error = el('div', { class: 'error', role: 'alert' });
+  dlg.replaceChildren(el('form', {
+    onsubmit: async (e) => {
+      e.preventDefault();
+      try { await action(); dlg.close(); render(); } catch (err) { error.textContent = err.message; }
+    },
+  }, el('p', null, text), error, el('div', { class: 'row-end' },
+    el('button', { type: 'button', onclick: () => dlg.close() }, 'Отмена'),
+    el('button', { type: 'submit', class: 'primary' }, yes))));
+  dlg.showModal();
+}
+const act = (path) => async () => {
+  try { await api(path, 'POST'); render(); } catch (err) { confirmBox(err.message, 'Понятно', async () => {}); }
+};
+
+let renderCount = 0;
+async function render() {
+  const run = ++renderCount;
+  if (!token) { await renderLogin(); return; }
+  try {
+    me = await api('/api/logist/me');
+    refs = await api('/api/logist/refs');
+    const tabs = [['notices', 'Уведомления' + (me.notices ? ` (${me.notices})` : '')], ['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты']];
+    const head = el('header', null, el('h1', null, 'АвтоВес: логист'),
+      el('nav', null, tabs.map(([id, name]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, name))),
+      el('button', { id: 'logout', onclick: () => { setToken(null); render(); } }, 'Выйти (' + me.login + ')'));
+    const body = await ({ notices: renderNotices, report: renderReport, legs: renderLegs, clients: renderClients, drivers: renderDrivers, logists: renderLogists })[tab]();
+    if (run !== renderCount) return;
+    view.replaceChildren(head, body);
+  } catch (err) {
+    if (!token || run !== renderCount) return;
+    view.replaceChildren(el('div', { class: 'error', role: 'alert' }, err.message), el('button', { onclick: render }, 'Повторить'));
+  }
+}
+
+async function renderLogin() {
+  let status = { setup: false, empty: false };
+  try { status = await api('/api/logist/status'); } catch (e) {}
+  const error = el('div', { class: 'error', role: 'alert' });
+  const login = el('input', { id: 'l-login', autocomplete: 'username', autocapitalize: 'off' });
+  const password = el('input', { id: 'l-pass', type: 'password', autocomplete: status.setup ? 'new-password' : 'current-password' });
+  const name = el('input', { id: 'l-name' });
+  view.replaceChildren(el('form', {
+    class: 'login',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        const res = status.setup
+          ? await api('/api/logist/setup', 'POST', { login: login.value, password: password.value, name: name.value })
+          : await api('/api/logist/login', 'POST', { login: login.value, password: password.value });
+        setToken(res.token); render();
+      } catch (err) { error.textContent = err.message; }
+    },
+  }, el('h1', null, status.setup ? 'Первый логист' : 'Кабинет логиста'),
+  status.setup ? el('p', { class: 'note' }, 'Логистов пока нет. Создайте первого: он сможет добавлять остальных.') : null,
+  status.empty && !status.setup ? el('p', { class: 'note' }, 'Логистов пока нет. Первого создают в программе АвтоВес на весовой, вкладка «Уведомления».') : null,
+  status.setup ? el('label', null, 'Имя', name) : null,
+  el('label', null, 'Логин', login), el('label', null, status.setup ? 'Пароль, от 8 символов' : 'Пароль', password),
+  el('button', { class: 'primary', type: 'submit', id: 'l-enter' }, status.setup ? 'Создать логиста' : 'Войти'), error));
+}
+
+// ----- уведомления -----
+function clientFields(c) {
+  return [
+    { name: 'name', label: 'Название', value: c ? c.name : '' },
+    { name: 'legal', label: 'Счёт после выгрузки', value: c && c.legal ? '1' : '0', options: [{ value: '0', label: 'Не нужен' }, { value: '1', label: 'Нужен: клиент — юрлицо' }] },
+    { name: 'legal_name', label: 'Юрлицо для счёта, если отличается от названия', value: c ? c.legal_name : '', maxlength: 200 },
+    { name: 'manager', label: 'Менеджер клиента', value: c ? c.manager : '', maxlength: 120 },
+  ];
+}
+function editClient(c) {
+  form(c ? 'Клиент: ' + c.name : 'Добавить клиента', clientFields(c), c ? 'Сохранить' : 'Добавить клиента',
+    (v) => api('/api/logist/clients', 'POST', { id: c ? c.id : undefined, name: v.name, legal: v.legal === '1', legal_name: v.legal_name, manager: v.manager, active: c ? !!c.active : true }));
+}
+async function renderNotices() {
+  const data = await api('/api/logist/notices?invoices=' + invoiceView);
+  const pending = invoiceView === 'pending';
+  const switchTo = (v) => el('button', { 'aria-current': invoiceView === v ? 'page' : null, onclick: () => { invoiceView = v; render(); } }, v === 'pending' ? 'Ждут счёта' : 'Выставлены');
+  return el('div', null,
+    data.new_clients.length ? el('section', { id: 'new-clients' }, el('h2', null, 'Новые клиенты от водителей'),
+      el('p', { class: 'note' }, 'Проверьте каждого: если это юрлицо, по его выгрузкам появится напоминание о счёте.'),
+      el('div', { class: 'actions' }, data.new_clients.map((n) => el('button', { onclick: () => editClient(refs.clients.find((c) => c.id === n.id)) }, n.name)))) : null,
+    el('section', { id: 'bad-legs' }, el('h2', null, 'Расхождения с весами'),
+      data.legs.length ? el('div', { class: 'scroll' }, el('table', null,
+        el('thead', null, el('tr', null, ['Выезд', 'Машина', 'Водитель'].map((t) => el('th', null, t)), ['По весам, л', 'По водителю, л', 'Разница, л'].map((t) => el('th', { class: 'num' }, t)), el('th', null, ''))),
+        el('tbody', null, data.legs.map((g) => el('tr', null, el('td', null, when(g.start)), el('td', null, g.plate + (g.trailer ? ' + ' + g.trailer : '')), el('td', null, g.driver),
+          el('td', { class: 'num' }, fmt(g.scale_l)), el('td', { class: 'num' }, fmt(g.driver_l)),
+          el('td', { class: 'num bad' }, fmt(g.diff_l) + (g.diff_pct === null ? '' : ` (${fmt(g.diff_pct)} %)`)),
+          el('td', null, el('button', { onclick: act(`/api/logist/legs/${g.id}/done`) }, 'Разобрано')))))))
+        : el('p', { class: 'empty' }, 'Расхождений нет.')),
+    el('section', null, el('h2', null, 'Счета клиентам'),
+      el('div', { class: 'controls' }, el('nav', null, switchTo('pending'), switchTo('done'))),
+      data.invoices.length ? el('div', { class: 'scroll' }, el('table', { id: 'invoices' },
+        el('thead', null, el('tr', null, ['Выгрузка', 'Клиент'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Литры'), ['Менеджер', 'Водитель', pending ? '' : 'Выставлен', ''].map((t) => el('th', null, t)))),
+        el('tbody', null, data.invoices.map((i) => el('tr', null, el('td', null, when(i.ts)),
+          el('td', null, i.client, i.client !== i.point ? [el('br'), el('small', null, i.point)] : null),
+          el('td', { class: 'num' }, fmt(i.liters)), el('td', null, i.manager || el('span', { class: 'bad' }, 'Не указан')),
+          el('td', null, i.driver), el('td', null, pending ? '' : when(i.invoiced_at) + ', ' + i.invoiced_by),
+          el('td', null, pending ? el('button', { class: 'primary', onclick: act(`/api/logist/invoices/${i.id}/done`) }, 'Счёт выставлен')
+            : el('button', { onclick: act(`/api/logist/invoices/${i.id}/undo`) }, 'Вернуть в ожидание')))))))
+        : el('p', { class: 'empty' }, pending ? 'Все счета выставлены.' : 'Пока нет отмеченных счетов.')));
+}
+
+// ----- выгрузки -----
+const query = (f) => new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
+function totals(title, rows) {
+  return el('div', null, el('h2', null, title), rows.length ? el('table', null,
+    el('thead', null, el('tr', null, el('th', null, 'Название'), el('th', { class: 'num' }, 'Литры'), el('th', { class: 'num' }, 'Выгрузок'))),
+    el('tbody', null, rows.map((r) => el('tr', null, el('td', null, r.name), el('td', { class: 'num' }, fmt(r.liters)), el('td', { class: 'num' }, r.count)))))
+    : el('p', { class: 'empty' }, 'Нет выгрузок.'));
+}
+async function renderReport() {
+  const rep = await api('/api/logist/report?' + query(filter));
+  const set = (key) => (e) => { filter[key] = e.target.value; render(); };
+  const pick = (title, key, opts) => el('label', null, title, el('select', { onchange: set(key) },
+    [{ value: '', label: 'Все' }].concat(opts).map((o) => el('option', { value: o.value, selected: String(o.value) === filter[key] }, o.label))));
+  const download = async () => {
+    const resp = await api('/api/logist/report.xlsx?' + query(filter));
+    const url = URL.createObjectURL(await resp.blob());
+    const a = el('a', { href: url, download: `vygruzki_${filter.from}_${filter.to}.xlsx` });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  };
+  const editUnload = (u) => form('Изменить выгрузку', [
+    { name: 'liters', label: 'Литры', value: u.liters, inputmode: 'decimal' },
+    { name: 'client_id', label: 'Клиент', value: u.client_id, options: refs.clients.map((c) => ({ value: c.id, label: c.name })) },
+    { name: 'comment', label: 'Комментарий', value: u.comment, maxlength: 200 },
+  ], 'Сохранить', (v) => api('/api/logist/unloads/' + u.id, 'PATCH', { liters: v.liters, client_id: Number(v.client_id), comment: v.comment }));
+  return el('div', null,
+    el('div', { class: 'controls' },
+      el('label', null, 'С даты', el('input', { type: 'date', value: filter.from, onchange: set('from') })),
+      el('label', null, 'По дату', el('input', { type: 'date', value: filter.to, onchange: set('to') })),
+      pick('Водитель', 'driver_id', refs.drivers.map((d) => ({ value: d.id, label: d.name }))),
+      pick('Клиент', 'client_id', refs.clients.map((c) => ({ value: c.id, label: c.name }))),
+      pick('Машина или прицеп', 'plate', refs.vehicles.map((v) => ({ value: v.plate, label: v.plate }))),
+      el('button', { id: 'xlsx', onclick: download }, 'Скачать Excel')),
+    el('p', { class: 'figures' }, el('b', { id: 'r-total' }, fmt(rep.total)), ' л, выгрузок: ', el('span', { id: 'r-count' }, rep.count)),
+    el('div', { class: 'columns' }, totals('По клиентам', rep.by_client), totals('По водителям', rep.by_driver), totals('По машинам', rep.by_plate), totals('По прицепам', rep.by_trailer)),
+    el('section', null, el('h2', null, 'Выгрузки'), rep.unloads.length ? el('div', { class: 'scroll' }, el('table', { id: 'unloads' },
+      el('thead', null, el('tr', null, ['Время', 'Водитель', 'Машина', 'Клиент'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Литры'), ['Счёт', 'Комментарий', ''].map((t) => el('th', null, t)))),
+      el('tbody', null, rep.unloads.map((u) => el('tr', null, el('td', null, when(u.ts)), el('td', null, u.driver), el('td', null, u.plate + (u.trailer ? ' + ' + u.trailer : '')),
+        el('td', null, u.client), el('td', { class: 'num' }, fmt(u.liters)),
+        el('td', null, { pending: 'нужно выставить', done: 'выставлен' }[u.invoice] || ''), el('td', null, u.comment),
+        el('td', null, el('div', { class: 'actions' }, el('button', { onclick: () => editUnload(u) }, 'Изменить'),
+          el('button', { onclick: () => confirmBox(`Удалить выгрузку: ${u.driver}, ${u.client}, ${fmt(u.liters)} л?`, 'Удалить', () => api('/api/logist/unloads/' + u.id, 'DELETE')) }, 'Удалить'))))))))
+      : el('p', { class: 'empty' }, 'За выбранный период выгрузок нет.')));
+}
+
+// ----- сверка -----
+async function renderLegs() {
+  const rows = await api('/api/logist/legs?' + query(legFilter));
+  const set = (key) => (e) => { legFilter[key] = e.target.value; render(); };
+  const status = (g) => ({ ok: el('span', { class: 'good' }, 'Сходится'), bad: el('span', { class: 'bad' }, 'Расхождение'), open: 'В рейсе, осталось ' + fmt(g.left_l) + ' л', unknown: 'Нельзя сравнить: нет тары или сменился прицеп' })[g.status];
+  return el('div', null,
+    el('div', { class: 'controls' },
+      el('label', null, 'Выезд с даты', el('input', { type: 'date', value: legFilter.from, onchange: set('from') })),
+      el('label', null, 'По дату', el('input', { type: 'date', value: legFilter.to, onchange: set('to') }))),
+    el('p', { class: 'note' }, `Поездка считается от взвешивания «уехал с базы» до следующего «приехал». Расхождением считается разница больше ${fmt(me.tolerance.tolerance_pct)} % и больше ${fmt(me.tolerance.tolerance_l)} л: литры по весам пересчитаны из килограммов по плотности.`),
+    rows.length ? el('div', { class: 'scroll' }, el('table', { id: 'legs' },
+      el('thead', null, el('tr', null, ['Выезд', 'Возврат', 'Машина', 'Водитель'].map((t) => el('th', null, t)),
+        ['При выезде, л', 'При возврате, л', 'По весам, л', 'По водителю, л', 'Разница, л'].map((t) => el('th', { class: 'num' }, t)), el('th', null, 'Итог'))),
+      el('tbody', null, rows.map((g) => el('tr', null, el('td', null, when(g.start)), el('td', null, when(g.end)), el('td', null, g.plate + (g.trailer ? ' + ' + g.trailer : '')), el('td', null, g.driver),
+        el('td', { class: 'num' }, fmt(g.out_l)), el('td', { class: 'num' }, fmt(g.in_l)), el('td', { class: 'num' }, fmt(g.scale_l)),
+        el('td', { class: 'num' }, fmt(g.driver_l) + ` (${g.unloads})`), el('td', { class: 'num' + (g.status === 'bad' ? ' bad' : '') }, fmt(g.diff_l)), el('td', null, status(g)))))))
+      : el('p', { class: 'empty' }, 'За период нет выездов с базы с известной тарой машины.'));
+}
+
+// ----- справочники -----
+function renderClients() {
+  return el('div', null, el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'add-client', onclick: () => editClient(null) }, 'Добавить клиента')),
+    refs.clients.length ? el('div', { class: 'scroll' }, el('table', { id: 'clients' },
+      el('thead', null, el('tr', null, ['Название', 'Счёт', 'Юрлицо', 'Менеджер', ''].map((t) => el('th', null, t)))),
+      el('tbody', null, refs.clients.map((c) => el('tr', { class: c.active ? null : 'off' }, el('td', null, c.name),
+        el('td', null, c.legal ? 'Нужен' : (c.reviewed ? 'Не нужен' : el('span', { class: 'bad' }, 'Новый от водителя, проверьте'))),
+        el('td', null, c.legal_name), el('td', null, c.manager),
+        el('td', null, el('div', { class: 'actions' }, el('button', { onclick: () => editClient(c) }, 'Изменить'),
+          el('button', { onclick: async () => { await api('/api/logist/clients', 'POST', { id: c.id, name: c.name, legal: !!c.legal, legal_name: c.legal_name, manager: c.manager, active: !c.active }); render(); } }, c.active ? 'Скрыть' : 'Вернуть'))))))))
+      : el('p', { class: 'empty' }, 'Добавьте клиентов, которым водители возят газ. Водитель может указать и нового клиента.'));
+}
+function renderDrivers() {
+  const edit = (d) => form(d ? 'Водитель: ' + d.name : 'Добавить водителя', [
+    { name: 'name', label: 'ФИО', value: d ? d.name : '' },
+    { name: 'login', label: 'Логин для приложения', value: d ? d.login : '' },
+    { name: 'password', label: d && d.has_password ? 'Новый пароль (пусто — не менять)' : 'Пароль, от 8 символов', type: 'password' },
+  ], d ? 'Сохранить' : 'Добавить водителя', (v) => api('/api/logist/drivers', 'POST', { id: d ? d.id : undefined, name: v.name, login: v.login, password: v.password || undefined, active: d ? !!d.active : true }));
+  return el('div', null, el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'add-driver', onclick: () => edit(null) }, 'Добавить водителя')),
+    el('p', { class: 'note' }, 'Водитель входит в приложение по логину и паролю один раз. Смена пароля выводит его из приложения на всех телефонах.'),
+    refs.drivers.length ? el('div', { class: 'scroll' }, el('table', { id: 'drivers' },
+      el('thead', null, el('tr', null, ['ФИО', 'Логин', 'Вход в приложение', ''].map((t) => el('th', null, t)))),
+      el('tbody', null, refs.drivers.map((d) => el('tr', { class: d.active ? null : 'off' }, el('td', null, d.name), el('td', null, d.login),
+        el('td', null, d.login && d.has_password ? 'Есть' : el('span', { class: 'bad' }, 'Задайте логин и пароль')),
+        el('td', null, el('div', { class: 'actions' }, el('button', { onclick: () => edit(d) }, 'Изменить'),
+          d.login ? el('button', { onclick: async () => { try { await api('/api/logist/drivers', 'POST', { id: d.id, name: d.name, login: d.login, active: !d.active }); render(); } catch (err) { confirmBox(err.message, 'Понятно', async () => {}); } } }, d.active ? 'Отключить' : 'Включить') : null)))))))
+      : el('p', { class: 'empty' }, 'Добавьте водителей, чтобы они могли войти в приложение.'));
+}
+async function renderLogists() {
+  const list = await api('/api/logist/logists');
+  const add = () => form('Добавить логиста', [
+    { name: 'name', label: 'Имя' }, { name: 'login', label: 'Логин' }, { name: 'password', label: 'Пароль, от 8 символов', type: 'password' },
+    { name: 'admin', label: 'Права', value: '0', options: [{ value: '0', label: 'Логист' }, { value: '1', label: 'Администратор: может добавлять логистов' }] },
+  ], 'Добавить логиста', (v) => api('/api/logist/logists', 'POST', { name: v.name, login: v.login, password: v.password, admin: v.admin === '1' }));
+  const pass = (l) => form('Новый пароль: ' + l.login, [{ name: 'password', label: 'Пароль, от 8 символов', type: 'password' }], 'Сменить пароль', async (v) => {
+    const res = await api('/api/logist/logists', 'POST', { id: l.id, password: v.password });
+    if (res.token) setToken(res.token);
+  });
+  return el('div', null, me.admin ? el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'add-logist', onclick: add }, 'Добавить логиста')) : null,
+    el('div', { class: 'scroll' }, el('table', { id: 'logists' },
+      el('thead', null, el('tr', null, ['Логин', 'Имя', 'Права', ''].map((t) => el('th', null, t)))),
+      el('tbody', null, list.map((l) => el('tr', { class: l.active ? null : 'off' }, el('td', null, l.login), el('td', null, l.name), el('td', null, l.admin ? 'Администратор' : 'Логист'),
+        el('td', null, el('div', { class: 'actions' },
+          me.admin || l.login === me.login ? el('button', { onclick: () => pass(l) }, 'Сменить пароль') : null,
+          me.admin && l.login !== me.login ? el('button', { onclick: async () => { await api('/api/logist/logists', 'POST', { id: l.id, active: !l.active }); render(); } }, l.active ? 'Отключить' : 'Включить') : null))))))));
+}
+render();
+</script>
+</body>
+</html>

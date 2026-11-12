@@ -638,3 +638,9 @@ const DriversUI = (() => {
   return { open };
 })();
 $$("nav button[data-tab=drivers]").forEach(b => b.addEventListener("click", () => DriversUI.open()));
+
+// Кабинет логиста (уведомления о счетах и расхождениях, выгрузки) загружается при первом открытии вкладки
+$$("nav button[data-tab=logist]").forEach(b => b.addEventListener("click", () => {
+  const f = $("#logistFrame");
+  if (!f.getAttribute("src")) f.src = "/logist";
+}));

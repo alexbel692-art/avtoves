@@ -22,6 +22,7 @@ from starlette.staticfiles import StaticFiles
 from . import __version__
 from . import settings as st
 from .drivers import DriverAuth
+from .logist import build_routes as logist_routes
 from .operator_auth import COOKIE as OP_COOKIE, DAYS as OP_DAYS, OperatorAuth, OperatorGate
 from .plates import normalize as norm_plate
 from .weighing import DriverError
@@ -686,6 +687,40 @@ h2{{margin:0 0 12px}}img{{height:60px;margin:6px 6px 0 0}}.n{{font-size:22px;fon
         Route("/api/settings", settings_save, methods=["POST"]),
         Route("/api/settings/test/{kind}", settings_test, methods=["POST"]),
         Route("/api/settings/restart", settings_restart, methods=["POST"]),
+        *logist_routes(ctx, public=False),
         Mount("/snapshots", StaticFiles(directory=str(snap_dir)), name="snapshots"),
         Mount("/static", NoCacheStatic(directory=str(STATIC)), name="static"),
     ])
+
+
+def build_public_app(ctx) -> Starlette:
+    """Внешний порт (в интернет через прокси): только приложение водителя и кабинет логиста.
+    Здесь нет ни светофоров, ни настроек, ни рабочего места оператора."""
+    async def ping(_):
+        return JSONResponse({"ok": True, "version": __version__})
+
+    async def root(_):
+        return RedirectResponse("/logist", 302)
+
+    async def security(request: Request, call_next):
+        resp = await call_next(request)
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        return resp
+
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.middleware.cors import CORSMiddleware
+    return Starlette(
+        middleware=[
+            # Приложение водителя открыто из файла внутри APK; вход только по токену, без cookie
+            Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"],
+                       allow_headers=["Authorization", "Content-Type"]),
+            Middleware(BaseHTTPMiddleware, dispatch=security),
+        ],
+        routes=[
+            Route("/", root),
+            Route("/api/ping", ping),
+            *logist_routes(ctx, public=True),
+            Mount("/static", NoCacheStatic(directory=str(STATIC)), name="static"),
+        ])
