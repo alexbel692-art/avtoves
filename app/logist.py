@@ -1138,6 +1138,54 @@ def build_routes(ctx, public: bool) -> list[Route]:
             db.x("DELETE FROM st_links WHERE plate=?", (plate,))
         return JSONResponse({"ok": True})
 
+    # ---- карта: где сейчас машины
+    @handler
+    async def map_api(request: Request):
+        logist_of(request)
+        if not stv.ready():
+            return JSONResponse({"configured": False, "vehicles": [], "unlinked": [], "error": None})
+        loop = asyncio.get_running_loop()
+        today = datetime.now().strftime("%Y-%m-%dT00:00:00")
+
+        def work():
+            all_pos = stv.positions()
+            vehicles, unlinked = [], []
+            for v in db.vehicles():
+                if v.get("kind") == "trailer":
+                    continue
+                dev = stv.device_for(v["plate"])
+                pos = all_pos.get(dev["id"]) if dev else None
+                if not dev or not pos or pos.get("latitude") is None:
+                    unlinked.append(v["plate"])
+                    continue
+                f = stv.fuel_of(dev, pos)
+                # Кто на машине: водитель последнего взвешивания или последней выгрузки
+                last = db.q("SELECT driver_id, trailer, ts FROM (SELECT driver_id, trailer, ts FROM weighings WHERE plate=? "
+                            "AND driver_id IS NOT NULL UNION ALL SELECT driver_id, trailer, ts FROM unloads WHERE plate=? "
+                            "AND deleted IS NULL) ORDER BY ts DESC LIMIT 1", (v["plate"], v["plate"]))
+                driver = db.driver(last[0]["driver_id"]) if last else None
+                done = db.q("SELECT COALESCE(SUM(liters),0) AS l, COUNT(*) AS n FROM unloads WHERE plate=? "
+                            "AND deleted IS NULL AND ts>=?", (v["plate"], today))[0]
+                orders = db.q("SELECT c.name AS client, o.address, o.liters FROM orders o JOIN clients c ON c.id=o.client_id "
+                              "WHERE o.driver_id=? AND o.status='new' ORDER BY o.day, o.pos, o.id",
+                              (driver["id"],)) if driver else []
+                c = lcfg()
+                road = legs(db, density(), c["tolerance_pct"], c["tolerance_l"], plate=v["plate"])
+                road = road[0] if road and road[0]["status"] == "open" else None
+                vehicles.append({
+                    "plate": v["plate"], "device": dev["name"], "lat": pos["latitude"], "lon": pos["longitude"],
+                    "speed": round(pos.get("speed") or 0), "course": pos.get("course"), "address": pos.get("address") or "",
+                    "time": pos.get("deviceTime"), "age_s": f["age_s"],
+                    "stale": f["age_s"] is None or f["age_s"] > 30 * 60, "fuel": f["liters"],
+                    "driver": driver["name"] if driver else "", "trailer": (last[0]["trailer"] or "") if last else "",
+                    "today_l": round(done["l"], 2), "today_n": done["n"], "orders": orders,
+                    "gas_left_l": road["left_l"] if road else None})
+            return {"configured": True, "vehicles": vehicles, "unlinked": unlinked, "error": None}
+        try:
+            return JSONResponse(await loop.run_in_executor(None, work))
+        except StError as ex:
+            return JSONResponse({"configured": True, "vehicles": [], "unlinked": [], "error": str(ex)})
+
     # ---- взвешивания с фото
     @handler
     async def weighings_api(request: Request):
@@ -1221,6 +1269,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/orders/{oid:int}/cancel", order_cancel, methods=["POST"]),
         Route("/api/logist/orders/{oid:int}/seen", order_note_done, methods=["POST"]),
         Route("/api/logist/weighings", weighings_api),
+        Route("/api/logist/map", map_api),
         Route("/api/logist/stavtrack", stavtrack_api, methods=["GET", "POST"]),
         Route("/api/logist/stavtrack/check", stavtrack_check),
         Route("/api/logist/stavtrack/link", stavtrack_link, methods=["POST"]),

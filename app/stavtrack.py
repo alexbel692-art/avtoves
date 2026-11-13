@@ -59,6 +59,7 @@ class Stavtrack:
         self.token_for = None
         self.devices_cache: tuple[float, list] = (0.0, [])
         self.sensors_cache: dict[int, tuple[float, list]] = {}
+        self.positions_cache: tuple[float, dict] = (0.0, {})
 
     # ---- настройки (хранятся в базе; пароль наружу не отдаётся)
     def settings(self) -> dict:
@@ -148,6 +149,15 @@ class Stavtrack:
         self.sensors_cache[device_id] = (time.time(), got)
         return got
 
+    def positions(self) -> dict[int, dict]:
+        """Последние позиции всех устройств учётной записи (для карты), не чаще раза в 30 секунд."""
+        ts, cached = self.positions_cache
+        if time.time() - ts < 30 and cached:
+            return cached
+        got = {p["deviceId"]: p for p in (self.call("/positions") or []) if p.get("deviceId") is not None}
+        self.positions_cache = (time.time(), got)
+        return got
+
     # ---- привязка машины к устройству
     def device_for(self, plate: str) -> dict | None:
         devs = self.devices()
@@ -167,9 +177,13 @@ class Stavtrack:
         if not dev:
             return {"liters": None, "pos_time": None, "age_s": None, "raw": {},
                     "note": "машина не привязана к устройству Ставтрэка"}
-        sensors = self.fuel_sensors(dev["id"])
         pos = self.call("/positions", {"deviceIds": dev["id"]}) or []
         pos = next((p for p in pos if p.get("deviceId") == dev["id"]), pos[0] if pos else None)
+        return self.fuel_of(dev, pos)
+
+    def fuel_of(self, dev: dict, pos: dict | None) -> dict:
+        s = self.settings()
+        sensors = self.fuel_sensors(dev["id"])
         if not pos:
             return {"liters": None, "pos_time": None, "age_s": None, "raw": {}, "note": "нет данных от трекера"}
         values = pos.get("sensorsAttributes") or {}

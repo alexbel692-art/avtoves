@@ -416,6 +416,9 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         desk.screenshot(path=SHOTS / "legs.png")
         desk.click("nav [data-tab=drivers]")
         expect(desk.locator("#drivers tbody tr")).to_have_count(2)
+        desk.route("https://tile.openstreetmap.org/**", lambda route: route.abort())
+        desk.click("nav [data-tab=map]")
+        expect(desk.locator("#fleet")).to_contain_text("Ставтрэк не подключён")
         desk.click("nav [data-tab=stavtrack]")
         expect(desk.locator("#st-state")).to_have_text("Выключено")
         desk.click("#st-check")
@@ -584,8 +587,16 @@ class FakeWiaFleet:
         async def positions(request):
             if not authed(request):
                 return Response("", 401)
+            when = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=self.age_min)
+            mine = {"deviceId": 11, "deviceTime": when.isoformat(timespec="seconds") + "Z", "latitude": 45.04,
+                    "longitude": 41.97, "speed": 62.4, "address": "Ставрополь, ул. Ленина",
+                    "sensorsAttributes": {"ДУТ бак": self.fuel, "Зажигание": True}}
+            other = {"deviceId": 12, "deviceTime": "2026-01-01T00:00:00Z", "latitude": 45.3, "longitude": 42.5,
+                     "sensorsAttributes": {}}
+            if "deviceIds" not in request.query_params:
+                return JSONResponse([mine, other])
             if request.query_params["deviceIds"] != "11":
-                return JSONResponse([{"deviceId": 12, "deviceTime": "2026-01-01T00:00:00Z", "sensorsAttributes": {}}])
+                return JSONResponse([other])
             when = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=self.age_min)
             return JSONResponse([{"deviceId": 11, "deviceTime": when.isoformat(timespec="seconds") + "Z",
                                   "latitude": 45.0, "longitude": 42.0,
@@ -640,6 +651,16 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     ws = call(public, "/api/logist/weighings" + q, token=logist)[1]
     assert [w["fuel"] for w in ws] == [300.0, 400.0, 400.0]
 
+    # Карта: машина, её водитель, прицеп, заказы и топливо
+    call(public, "/api/logist/orders", "POST", {"client_id": 1, "liters": 5000, "driver_id": 1, "day": f"{datetime.now():%Y-%m-%d}"}, logist)
+    m = call(public, "/api/logist/map", token=logist)[1]
+    assert m["error"] is None and m["unlinked"] == []
+    [car] = m["vehicles"]
+    assert (car["plate"], car["lat"], car["lon"], car["speed"], car["fuel"], car["stale"]) == ("Т100АА26", 45.04, 41.97, 62, 300.0, False)
+    assert (car["driver"], car["trailer"], car["today_l"], car["address"]) == ("Иванов Сергей", "АВ123477", 24000.0, "Ставрополь, ул. Ленина")
+    assert [(o["client"], o["liters"]) for o in car["orders"]] == [("АГЗС Север", 5000.0)]
+    assert call(public, "/api/logist/map", token=token)[0] == 401
+
     # Устаревшие данные трекера в расчёт не идут, но видны с пометкой
     fake.age_min = 60
     weigh(ctx, public, token, "departure", 28500, t0 + timedelta(hours=5))
@@ -655,3 +676,37 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     ctx.stavtrack.save({})
     weigh(ctx, public, token, "arrival", 15500, t0 + timedelta(hours=5, minutes=30))
     assert "Ставтрэк" in wait_fuel(ctx, 5)[-1]["note"]
+
+
+def test_map_in_browser(env):
+    from playwright.sync_api import expect, sync_playwright
+    ctx, local, public, logist = env
+    fake = FakeWiaFleet()
+    token = driver_token(public)
+    call(public, "/api/logist/stavtrack", "POST", {"enabled": True, "url": fake.url, "email": "ves@example.ru", "password": "st-parol", "fuel_density": 0.84, "max_age_min": 15}, logist)
+    weigh(ctx, public, token, "arrival", 15000, datetime.now() - timedelta(hours=2))
+    call(public, "/api/logist/orders", "POST", {"client_id": 1, "liters": 5000, "driver_id": 1, "day": f"{datetime.now():%Y-%m-%d}", "address": "с. Южное"}, logist)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.route("https://tile.openstreetmap.org/**", lambda route: route.abort())
+        page.goto(public + "/logist")
+        page.fill("#l-login", "olga")
+        page.fill("#l-pass", "parol-logista")
+        page.click("#l-enter")
+        page.click("nav [data-tab=map]")
+        expect(page.locator(".car-mark")).to_have_count(1)
+        page.click("#fleet button:has-text('Т100АА26')")
+        popup = page.locator(".leaflet-popup-content")
+        expect(popup).to_contain_text("Иванов Сергей")
+        expect(popup).to_contain_text("АГЗС Север")
+        expect(popup).to_contain_text("топливо: 400 л")
+        SHOTS.mkdir(exist_ok=True)
+        page.screenshot(path=SHOTS / "map.png")
+        page.click("nav [data-tab=report]")       # уход с карты не оставляет ошибок
+        page.click("nav [data-tab=map]")
+        expect(page.locator(".car-mark")).to_have_count(1)
+        assert errors == []
+        browser.close()

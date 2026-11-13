@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>АвтоВес: логист</title>
+<link rel="stylesheet" href="/static/leaflet/leaflet.css">
 <style>
 :root { --bg:#e6ebef; --paper:#fff; --ink:#101b25; --muted:#51606d; --line:#b7c1ca; --accent:#0b5cad; --accent-d:#084a8c; --bad:#b3261e; --ok:#14663c; }
 * { box-sizing:border-box; }
@@ -44,11 +45,24 @@ dialog h2 { margin:0; }
 section { margin-bottom:22px; }
 .note { margin:0 0 10px; }
 small { color:var(--muted); }
+.map-wrap { display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:14px; }
+#map { height:calc(100vh - 200px); min-height:420px; background:#c9d2da; border:1px solid var(--ink); }
+.fleet { display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 200px); overflow-y:auto; }
+.fleet button { text-align:left; font-weight:400; padding:8px 10px; border-color:var(--line); }
+.fleet b { display:block; }
+.fleet .old { border-left:5px solid var(--muted); }
+.fleet .live { border-left:5px solid var(--accent); }
+.car-mark { width:auto !important; height:auto !important; background:none; border:0; }
+.car-mark span { display:inline-block; transform:translate(-50%,-50%); white-space:nowrap; background:#fff; color:#000; border:2px solid var(--accent); border-radius:4px; padding:1px 5px; font-weight:800; font-size:13px; }
+.car-mark.old span { border-color:var(--muted); color:var(--muted); }
+.car p { margin:3px 0; }
+@media (max-width:760px) { .map-wrap { grid-template-columns:1fr; } #map { height:60vh; } .fleet { max-height:none; } }
 </style>
 </head>
 <body>
 <main id="view"></main>
 <dialog id="dlg"></dialog>
+<script src="/static/leaflet/leaflet.js"></script>
 <script>
 'use strict';
 const view = document.getElementById('view');
@@ -144,6 +158,7 @@ const act = (path) => async () => {
 let renderCount = 0;
 async function render() {
   const run = ++renderCount;
+  stopMap();
   if (!token) { await renderLogin(); return; }
   try {
     me = await api('/api/logist/me');
@@ -151,14 +166,15 @@ async function render() {
     const manager = me.role === 'manager';
     const badge = 'Уведомления' + (me.notices ? ` (${me.notices})` : '');
     const tabs = manager ? [['notices', badge], ['report', 'Выгрузки'], ['logists', 'Мой пароль']]
-      : [['notices', badge], ['orders', 'Заказы'], ['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания'], ['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']].concat(me.admin ? [['stavtrack', 'Ставтрэк']] : []);
+      : [['notices', badge], ['map', 'Карта'], ['orders', 'Заказы'], ['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания'], ['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']].concat(me.admin ? [['stavtrack', 'Ставтрэк']] : []);
     if (!tabs.some(([id]) => id === tab)) tab = 'notices';
     const head = el('header', null, el('h1', null, manager ? 'АвтоВес: менеджер' : 'АвтоВес: логист'),
       el('nav', null, tabs.map(([id, name]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, name))),
       el('button', { id: 'logout', onclick: () => { setToken(null); render(); } }, 'Выйти (' + me.login + ')'));
-    const body = await ({ notices: renderNotices, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack })[tab]();
+    const body = await ({ notices: renderNotices, map: renderMap, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack })[tab]();
     if (run !== renderCount) return;
     view.replaceChildren(head, body);
+    if (tab === 'map') startMap();
   } catch (err) {
     if (!token || run !== renderCount) return;
     view.replaceChildren(el('div', { class: 'error', role: 'alert' }, err.message), el('button', { onclick: render }, 'Повторить'));
@@ -364,6 +380,83 @@ async function renderWeighings() {
         el('td', { class: 'num' }, w.fuel !== null && w.fuel !== undefined ? fmt(w.fuel) : el('small', null, w.fuel_note)),
         el('td', null, w.photos.length ? el('button', { onclick: () => showPhotos(w) }, 'Смотреть (' + w.photos.length + ')') : el('span', { class: 'bad' }, 'нет фото')))))))
       : el('p', { class: 'empty' }, 'За эти дни взвешиваний нет.'));
+}
+
+// ----- карта -----
+let map = null;
+let mapTimer = null;
+let markers = [];
+let mapFitted = false;
+function stopMap() {
+  clearInterval(mapTimer);
+  mapTimer = null;
+  if (map) { map.stop(); map.remove(); map = null; }
+  markers = [];
+  mapFitted = false;
+}
+function renderMap() {
+  return el('div', null,
+    el('div', { class: 'controls' }, el('span', { id: 'map-state' }, 'Загрузка…')),
+    el('div', { class: 'error', role: 'alert', id: 'map-error' }),
+    el('div', { class: 'map-wrap' }, el('div', { id: 'map' }), el('div', { class: 'fleet', id: 'fleet' })));
+}
+function carCard(v) {
+  return el('div', { class: 'car' },
+    el('p', null, el('b', null, v.plate + (v.trailer ? ' + ' + v.trailer : ''))),
+    el('p', null, v.driver ? 'Водитель: ' + v.driver : 'Водитель неизвестен'),
+    v.gas_left_l !== null ? el('p', null, 'Газа в цистерне по весам: ' + fmt(v.gas_left_l) + ' л') : null,
+    el('p', null, `Слито сегодня: ${fmt(v.today_l)} л, выгрузок: ${v.today_n}`),
+    v.orders.length ? el('p', null, 'Заказы: ', v.orders.map((o, i) => [el('br'), `${i + 1}. ${o.client}, ${fmt(o.liters)} л${o.address ? ', ' + o.address : ''}`])) : el('p', null, 'Заказов нет'),
+    el('p', null, `Скорость: ${v.speed} км/ч` + (v.fuel !== null ? `, топливо: ${fmt(v.fuel)} л` : '')),
+    v.address ? el('p', null, el('small', null, v.address)) : null,
+    el('p', null, el('small', null, 'Данные от ' + (v.time ? new Date(v.time).toLocaleString('ru-RU') : 'неизвестно'))));
+}
+async function updateMap() {
+  const data = await api('/api/logist/map');
+  if (tab !== 'map' || !map) return;
+  const opened = markers.find((m) => m.isPopupOpen());
+  const openedPlate = opened ? opened.options.title : null;
+  markers.forEach((m) => m.remove());
+  markers = [];
+  document.getElementById('map-error').textContent = data.error || '';
+  const items = [];
+  const bounds = [];
+  if (!data.configured) {
+    items.push(el('p', { class: 'note' }, 'Ставтрэк не подключён. Подключите его на вкладке «Ставтрэк», и машины появятся на карте.'));
+  }
+  for (const v of data.vehicles) {
+    const marker = L.marker([v.lat, v.lon], {
+      icon: L.divIcon({ className: 'car-mark' + (v.stale ? ' old' : ''), html: el('span', null, v.plate), iconSize: null }), title: v.plate,
+    }).addTo(map).bindPopup(carCard(v), { autoPan: false });
+    markers.push(marker);
+    bounds.push([v.lat, v.lon]);
+    if (v.plate === openedPlate) marker.openPopup();
+    items.push(el('button', {
+      class: v.stale ? 'old' : 'live',
+      onclick: () => { map.setView(marker.getLatLng(), Math.max(map.getZoom(), 11), { animate: false }); marker.openPopup(); },
+    }, el('b', null, v.plate), v.driver || 'Водитель неизвестен', el('br'),
+    el('small', null, (v.stale ? 'Давно нет данных' : v.speed + ' км/ч') + `, заказов: ${v.orders.length}, слито ${fmt(v.today_l)} л`)));
+  }
+  if (data.unlinked.length) {
+    items.push(el('p', { class: 'note', id: 'unlinked' }, 'Нет на карте: ' + data.unlinked.join(', ') + '. Привяжите их к устройствам на вкладке «Ставтрэк».'));
+  }
+  document.getElementById('fleet').replaceChildren(...items);
+  if (!mapFitted && bounds.length) {
+    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 12, animate: false });
+    mapFitted = true;
+  }
+  document.getElementById('map-state').textContent = 'Обновлено в ' + new Date().toLocaleTimeString('ru-RU') + '. Обновляется каждые 30 секунд.';
+}
+function startMap() {
+  if (!document.getElementById('map')) return;
+  map = L.map('map', { fadeAnimation: false, markerZoomAnimation: false }).setView([45.04, 41.97], 7);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; участники OpenStreetMap' }).addTo(map);
+  const refresh = () => updateMap().catch((err) => {
+    const box = document.getElementById('map-error');
+    if (box) box.textContent = err.message;
+  });
+  refresh();
+  mapTimer = setInterval(refresh, 30000);
 }
 
 // ----- Ставтрэк -----
