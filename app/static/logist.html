@@ -6,49 +6,99 @@
 <title>АвтоВес: логист</title>
 <link rel="stylesheet" href="/static/leaflet/leaflet.css">
 <style>
-:root { --bg:#e6ebef; --paper:#fff; --ink:#101b25; --muted:#51606d; --line:#b7c1ca; --accent:#0b5cad; --accent-d:#084a8c; --bad:#b3261e; --ok:#14663c; }
+:root { --bg:#eef1f5; --paper:#fff; --ink:#15202b; --muted:#566573; --line:#d5dbe2; --accent:#1d5fbf; --accent-d:#164a96; --bad:#b3261e; --ok:#14663c; --side:#15202b; --side-ink:#c9d3dd; --series:#2a78d6; --grid:#e3e8ee; }
 * { box-sizing:border-box; }
-body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.4 "Segoe UI",Roboto,"Noto Sans",system-ui,sans-serif; }
-main { max-width:1200px; margin:0 auto; padding:16px 16px 50px; }
-header { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; margin-bottom:16px; }
-h1 { font-size:21px; margin:0 auto 0 0; }
-h2 { font-size:17px; margin:0 0 8px; }
-nav { display:flex; flex-wrap:wrap; gap:4px; }
-button,input,select { font:inherit; color:inherit; min-height:38px; border-radius:5px; }
-button { background:#fff; border:1px solid var(--ink); padding:4px 12px; cursor:pointer; font-weight:600; }
+body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 "Segoe UI",Roboto,"Noto Sans",system-ui,sans-serif; }
+#view.app { display:grid; grid-template-columns:232px minmax(0,1fr); min-height:100vh; }
+aside { background:var(--side); color:var(--side-ink); padding:18px 12px; display:flex; flex-direction:column; gap:14px; position:sticky; top:0; height:100vh; overflow-y:auto; }
+aside .brand { color:#fff; font-size:19px; font-weight:800; padding:0 8px; }
+aside .brand small { display:block; color:var(--side-ink); font-size:12px; font-weight:400; }
+aside nav { display:flex; flex-direction:column; gap:2px; }
+aside nav button, aside .who button { background:none; border:0; color:var(--side-ink); text-align:left; font-weight:500; padding:8px 10px; border-radius:7px; min-height:38px; }
+aside nav button:hover, aside .who button:hover { background:#22303f; color:#fff; }
+aside nav button[aria-current="page"] { background:var(--accent); color:#fff; font-weight:700; }
+aside .group { font-size:12px; color:#8697a8; padding:10px 10px 2px; }
+aside .who { margin-top:auto; border-top:1px solid #2b3a4a; padding-top:10px; font-size:13px; }
+aside .who div { padding:0 10px 4px; }
+main.page { padding:22px 26px 50px; min-width:0; }
+main.page > h1 { font-size:24px; margin:0 0 16px; }
+h1 { font-size:21px; margin:0; }
+h2 { font-size:16px; margin:0 0 10px; }
+button,input,select { font:inherit; color:inherit; min-height:38px; border-radius:7px; }
+button { background:#fff; border:1px solid #b8c2cc; padding:4px 13px; cursor:pointer; font-weight:600; }
+button:hover { border-color:var(--ink); }
 button.primary { background:var(--accent); border-color:var(--accent-d); color:#fff; }
-button[aria-current="page"] { background:var(--ink); color:#fff; }
-input,select { background:#fff; border:1px solid var(--line); padding:4px 8px; max-width:100%; }
+button.primary:hover { background:var(--accent-d); }
+.seg { display:inline-flex; gap:4px; }
+.seg button[aria-current="page"] { background:var(--ink); color:#fff; border-color:var(--ink); }
+input,select { background:#fff; border:1px solid #b8c2cc; padding:4px 9px; max-width:100%; }
 :focus-visible { outline:3px solid #f0a000; outline-offset:1px; }
 label { display:flex; flex-direction:column; gap:3px; font-size:13px; font-weight:600; }
 .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:14px; }
 .figures { font-size:18px; margin:0 0 14px; }
 .figures b { font-size:34px; font-weight:800; font-variant-numeric:tabular-nums; }
 .columns { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; margin-bottom:18px; }
-.scroll { overflow-x:auto; }
+.scroll { overflow-x:auto; border:1px solid var(--line); border-radius:10px; background:var(--paper); }
 table { width:100%; border-collapse:collapse; background:var(--paper); }
-th,td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--line); vertical-align:middle; }
-th { font-size:13px; background:#eef1f4; }
+th,td { text-align:left; padding:9px 11px; border-bottom:1px solid var(--line); vertical-align:middle; }
+tbody tr:last-child td { border-bottom:0; }
+tbody tr:hover td { background:#f6f8fa; }
+th { font-size:12.5px; color:var(--muted); background:#f6f8fa; font-weight:600; }
 td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
 tr.off td { color:var(--muted); }
 .bad { color:var(--bad); font-weight:700; }
 .good { color:var(--ok); font-weight:600; }
 .actions { display:flex; gap:6px; flex-wrap:wrap; }
-.actions button { min-height:32px; padding:2px 9px; font-weight:500; }
+.actions button { min-height:32px; padding:2px 10px; font-weight:500; }
 .error { color:var(--bad); font-weight:600; min-height:1.3em; margin:8px 0; }
-.login { max-width:360px; margin:10vh auto; background:#fff; padding:22px; border:1px solid var(--ink); display:flex; flex-direction:column; gap:10px; }
-dialog { border:1px solid var(--ink); border-radius:8px; padding:18px; width:min(440px,calc(100vw - 32px)); }
+.login { max-width:380px; margin:10vh auto; background:#fff; padding:26px; border-radius:14px; box-shadow:0 10px 40px rgba(21,32,43,.14); display:flex; flex-direction:column; gap:11px; }
+dialog { border:0; border-radius:14px; padding:22px; width:min(480px,calc(100vw - 32px)); box-shadow:0 20px 60px rgba(21,32,43,.3); }
+dialog.wide { width:min(760px,calc(100vw - 32px)); }
+dialog::backdrop { background:rgba(21,32,43,.45); }
 dialog form { display:flex; flex-direction:column; gap:10px; }
-dialog h2 { margin:0; }
+dialog h2 { margin:0; font-size:18px; }
 .row-end { display:flex; gap:8px; justify-content:flex-end; margin-top:6px; }
 .empty { color:var(--muted); padding:10px 0; }
 section { margin-bottom:22px; }
-.note { margin:0 0 10px; }
+.note { margin:0 0 10px; color:var(--muted); }
 small { color:var(--muted); }
+.card { background:var(--paper); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:16px; }
+.tile { background:var(--paper); border:1px solid var(--line); border-radius:12px; padding:13px 16px; text-align:left; font-weight:400; min-height:0; }
+button.tile:hover { border-color:var(--accent); }
+.tile .k { font-size:13px; color:var(--muted); }
+.tile .v { white-space:nowrap; font-size:24px; font-weight:800; font-variant-numeric:tabular-nums; line-height:1.2; }
+.tile .s { font-size:13px; color:var(--muted); }
+.tile.alert .v { color:var(--bad); }
+.dash { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.dash .wide { grid-column:1 / -1; }
+.chart { position:relative; }
+.chart svg { width:100%; height:auto; display:block; }
+.chart .bar { fill:var(--series); }
+.chart .hit { fill:transparent; cursor:default; }
+.chart .bar:has(+ .hit:hover), .chart .bar:has(+ .hit:focus) { fill:#184f95; }
+.chart .hit:focus-visible { outline:2px solid #f0a000; outline-offset:-2px; }
+.chart text { font-size:11px; fill:var(--muted); }
+.chart text.val { fill:var(--ink); font-weight:700; }
+.chart line { stroke:var(--grid); }
+.hbars { display:grid; grid-template-columns:minmax(90px,38%) 1fr; gap:7px 10px; align-items:center; }
+.hbars .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }
+.hbars .track { display:flex; align-items:center; gap:8px; min-width:0; }
+.hbars .fill { height:14px; background:var(--series); border-radius:0 4px 4px 0; min-width:2px; }
+.hbars .track:hover .fill { background:#184f95; }
+.hbars .val { font-size:13px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.tip { position:fixed; z-index:50; background:var(--ink); color:#fff; padding:6px 9px; border-radius:7px; font-size:13px; pointer-events:none; white-space:nowrap; }
+details.tableview { margin-top:8px; font-size:13px; }
+details.tableview summary { cursor:pointer; color:var(--muted); }
+.pick-list { max-height:50vh; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+.pick-list td { padding:5px 8px; }
+.pick-list input[type=text] { min-height:32px; width:120px; }
+.pick-list select { min-height:32px; }
+.pick-list input[type=checkbox] { min-height:0; width:18px; height:18px; }
 .map-wrap { display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:14px; }
-#map { height:calc(100vh - 200px); min-height:420px; background:#c9d2da; border:1px solid var(--ink); }
-.fleet { display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 200px); overflow-y:auto; }
-.fleet button { text-align:left; font-weight:400; padding:8px 10px; border-color:var(--line); }
+#map { height:calc(100vh - 170px); min-height:420px; background:#c9d2da; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.fleet { display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 170px); overflow-y:auto; }
+.fleet button { text-align:left; font-weight:400; padding:9px 11px; border-color:var(--line); }
 .fleet b { display:block; }
 .fleet .old { border-left:5px solid var(--muted); }
 .fleet .live { border-left:5px solid var(--accent); }
@@ -56,11 +106,20 @@ small { color:var(--muted); }
 .car-mark span { display:inline-block; transform:translate(-50%,-50%); white-space:nowrap; background:#fff; color:#000; border:2px solid var(--accent); border-radius:4px; padding:1px 5px; font-weight:800; font-size:13px; }
 .car-mark.old span { border-color:var(--muted); color:var(--muted); }
 .car p { margin:3px 0; }
-@media (max-width:760px) { .map-wrap { grid-template-columns:1fr; } #map { height:60vh; } .fleet { max-height:none; } }
+@media (max-width:860px) {
+  #view.app { grid-template-columns:1fr; }
+  aside { position:static; height:auto; padding:10px; }
+  aside nav { flex-direction:row; flex-wrap:wrap; }
+  aside .group { display:none; }
+  aside .who { margin-top:0; border-top:0; display:flex; align-items:center; gap:8px; padding-top:0; }
+  main.page { padding:14px 12px 40px; }
+  .dash { grid-template-columns:minmax(0,1fr); }
+  .map-wrap { grid-template-columns:1fr; } #map { height:60vh; } .fleet { max-height:none; }
+}
 </style>
 </head>
 <body>
-<main id="view"></main>
+<div id="view"></div>
 <dialog id="dlg"></dialog>
 <script src="/static/leaflet/leaflet.js"></script>
 <script>
@@ -69,7 +128,7 @@ const view = document.getElementById('view');
 const dlg = document.getElementById('dlg');
 let token = null;
 try { token = localStorage.getItem('av.logist'); } catch (e) {}
-let tab = 'notices';
+let tab = 'home';
 let me = null;
 let refs = null;
 let invoiceView = 'pending';
@@ -113,6 +172,7 @@ function setToken(value) {
 }
 
 function form(title, fields, submitText, onSubmit) {
+  dlg.className = '';
   const error = el('div', { class: 'error', role: 'alert' });
   const inputs = {};
   const body = fields.map((f) => {
@@ -165,19 +225,29 @@ async function render() {
     refs = await api('/api/logist/refs');
     const manager = me.role === 'manager';
     const badge = 'Уведомления' + (me.notices ? ` (${me.notices})` : '');
-    const tabs = manager ? [['notices', badge], ['report', 'Выгрузки'], ['logists', 'Мой пароль']]
-      : [['notices', badge], ['map', 'Карта'], ['orders', 'Заказы'], ['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания'], ['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']].concat(me.admin ? [['stavtrack', 'Ставтрэк'], ['routing', 'Маршруты']] : []);
-    if (!tabs.some(([id]) => id === tab)) tab = 'notices';
-    const head = el('header', null, el('h1', null, manager ? 'АвтоВес: менеджер' : 'АвтоВес: логист'),
-      el('nav', null, tabs.map(([id, name]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, name))),
-      el('button', { id: 'logout', onclick: () => { setToken(null); render(); } }, 'Выйти (' + me.login + ')'));
-    const body = await ({ notices: renderNotices, map: renderMap, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting })[tab]();
+    const groups = manager
+      ? [['', [['home', 'Сводка'], ['notices', badge], ['report', 'Выгрузки']]], ['Настройки', [['logists', 'Мой пароль']]]]
+      : [['', [['home', 'Сводка'], ['notices', badge], ['map', 'Карта'], ['orders', 'Заказы']]],
+        ['Учёт', [['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания']]],
+        ['Справочники', [['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']]]]
+        .concat(me.admin ? [['Подключения', [['stavtrack', 'Ставтрэк'], ['routing', 'Маршруты']]]] : []);
+    const tabs = groups.flatMap(([, items]) => items);
+    if (!tabs.some(([id]) => id === tab)) tab = 'home';
+    const title = tabs.find(([id]) => id === tab)[1].replace(/ \(\d+\)$/, '');
+    const head = el('aside', null,
+      el('div', { class: 'brand' }, 'АвтоВес', el('small', null, manager ? 'Кабинет менеджера' : 'Кабинет логиста')),
+      el('nav', { 'aria-label': 'Разделы' }, groups.map(([name, items]) => [name ? el('div', { class: 'group' }, name) : null,
+        items.map(([id, label]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, label))])),
+      el('div', { class: 'who' }, el('div', null, me.name || me.login), el('button', { id: 'logout', onclick: () => { setToken(null); render(); } }, 'Выйти (' + me.login + ')')));
+    const body = await ({ home: renderHome, notices: renderNotices, map: renderMap, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting })[tab]();
     if (run !== renderCount) return;
-    view.replaceChildren(head, body);
+    view.className = 'app';
+    view.replaceChildren(head, el('main', { class: 'page' }, el('h1', null, title), body));
     if (tab === 'map') startMap();
   } catch (err) {
     if (!token || run !== renderCount) return;
-    view.replaceChildren(el('div', { class: 'error', role: 'alert' }, err.message), el('button', { onclick: render }, 'Повторить'));
+    view.className = '';
+    view.replaceChildren(el('div', { class: 'login' }, el('div', { class: 'error', role: 'alert' }, err.message), el('button', { onclick: render }, 'Повторить')));
   }
 }
 
@@ -186,6 +256,7 @@ async function renderLogin() {
   try { status = await api('/api/logist/status'); } catch (e) {}
   const error = el('div', { class: 'error', role: 'alert' });
   const login = el('input', { id: 'l-login', autocomplete: 'username', autocapitalize: 'off' });
+  view.className = '';
   const password = el('input', { id: 'l-pass', type: 'password', autocomplete: status.setup ? 'new-password' : 'current-password' });
   const name = el('input', { id: 'l-name' });
   view.replaceChildren(el('form', {
@@ -205,6 +276,99 @@ async function renderLogin() {
   status.setup ? el('label', null, 'Имя', name) : null,
   el('label', null, 'Логин', login), el('label', null, status.setup ? 'Пароль, от 8 символов' : 'Пароль', password),
   el('button', { class: 'primary', type: 'submit', id: 'l-enter' }, status.setup ? 'Создать логиста' : 'Войти'), error));
+}
+
+// ----- сводка -----
+const SVG = 'http://www.w3.org/2000/svg';
+function svg(tag, attrs, ...children) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) node.setAttribute(k, v);
+  }
+  for (const c of children.flat(Infinity)) if (c !== null && c !== undefined && c !== false) node.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return node;
+}
+let tipNode = null;
+function tip(target, text) {
+  const show = (e) => {
+    hideTip();
+    tipNode = el('div', { class: 'tip', role: 'tooltip' }, text);
+    document.body.append(tipNode);
+    const r = target.getBoundingClientRect();
+    const x = e && e.clientX ? e.clientX : r.left + r.width / 2;
+    tipNode.style.left = Math.max(6, Math.min(window.innerWidth - tipNode.offsetWidth - 6, x - tipNode.offsetWidth / 2)) + 'px';
+    tipNode.style.top = Math.max(6, r.top - tipNode.offsetHeight - 8) + 'px';
+  };
+  target.addEventListener('mouseenter', show);
+  target.addEventListener('mousemove', show);
+  target.addEventListener('focus', () => show());
+  target.addEventListener('mouseleave', hideTip);
+  target.addEventListener('blur', hideTip);
+}
+function hideTip() { if (tipNode) { tipNode.remove(); tipNode = null; } }
+const dm = (d) => d.slice(8, 10) + '.' + d.slice(5, 7);
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  return [1, 2, 3, 4, 5, 8, 10].map((m) => m * p).find((m) => m >= v);
+}
+function dayChart(days) {
+  const W = 760, H = 250, L = 52, R = 10, T = 18, B = 26;
+  const max = niceMax(Math.max(...days.map((d) => d.liters)));
+  const slot = (W - L - R) / days.length;
+  const bw = Math.min(24, slot - 6);
+  const y = (v) => T + (H - T - B) * (1 - v / max);
+  const best = days.reduce((a, b) => (b.liters > a.liters ? b : a), days[0]);
+  const parts = [];
+  for (const g of [0, 0.25, 0.5, 0.75, 1]) {
+    parts.push(svg('line', { x1: L, x2: W - R, y1: y(max * g), y2: y(max * g) }),
+      svg('text', { x: L - 8, y: y(max * g) + 4, 'text-anchor': 'end' }, fmt(max * g)));
+  }
+  days.forEach((d, i) => {
+    const x = L + slot * i + (slot - bw) / 2;
+    const top = y(d.liters), h = H - B - top;
+    const hit = svg('rect', { class: 'hit', x: L + slot * i, y: T, width: slot, height: H - T - B, tabindex: 0, 'aria-label': `${dm(d.day)}: ${fmt(d.liters)} л, выгрузок ${d.count}` });
+    tip(hit, `${dm(d.day)}: ${fmt(d.liters)} л, выгрузок: ${d.count}`);
+    // столбик со скруглённым верхом и прямым основанием
+    const r = Math.min(4, h, bw / 2);
+    const bar = svg('path', { class: 'bar', d: h <= 0 ? '' : `M${x},${H - B} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${H - B} Z` });
+    parts.push(bar, hit);      // прозрачная область поверх столбика: подсказка появляется по всей высоте
+    if (d.liters > 0 && (d === best || i === days.length - 1)) parts.push(svg('text', { class: 'val', x: x + bw / 2, y: top - 5, 'text-anchor': 'middle' }, fmt(Math.round(d.liters))));
+    if (i % 2 === (days.length - 1) % 2) parts.push(svg('text', { x: x + bw / 2, y: H - 8, 'text-anchor': 'middle' }, dm(d.day)));
+  });
+  return el('div', { class: 'chart', id: 'chart-days' },
+    svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Слито литров по дням за 14 дней' }, parts),
+    el('details', { class: 'tableview' }, el('summary', null, 'Показать таблицей'),
+      el('table', null, el('thead', null, el('tr', null, el('th', null, 'День'), el('th', { class: 'num' }, 'Литры'), el('th', { class: 'num' }, 'Выгрузок'))),
+        el('tbody', null, days.map((d) => el('tr', null, el('td', null, dm(d.day)), el('td', { class: 'num' }, fmt(d.liters)), el('td', { class: 'num' }, d.count)))))));
+}
+function hbars(rows, id) {
+  if (!rows.length) return el('p', { class: 'empty' }, 'За 14 дней выгрузок нет.');
+  const max = Math.max(...rows.map((r) => r.liters));
+  return el('div', { class: 'hbars', id }, rows.map((r) => {
+    const track = el('div', { class: 'track', tabindex: 0 }, el('div', { class: 'fill', style: `width:${Math.max(1, r.liters / max * 70)}%` }), el('span', { class: 'val' }, fmt(Math.round(r.liters)) + ' л'));
+    tip(track, `${r.name}: ${fmt(r.liters)} л, выгрузок: ${r.count}`);
+    return [el('div', { class: 'name', title: r.name }, r.name), track];
+  }));
+}
+async function renderHome() {
+  const d = await api('/api/logist/dashboard');
+  const go = (t) => () => { tab = t; render(); };
+  const tile = (k, v, sub, to, alert) => el(to ? 'button' : 'div', { class: 'tile' + (alert ? ' alert' : ''), onclick: to ? go(to) : null },
+    el('div', { class: 'k' }, k), el('div', { class: 'v' }, v), el('div', { class: 's' }, sub));
+  return el('div', null,
+    el('div', { class: 'tiles', id: 'tiles' },
+      tile('Слито сегодня', fmt(Math.round(d.today.liters)) + ' л', 'выгрузок: ' + d.today.count, 'report'),
+      tile('За 14 дней', fmt(Math.round(d.period_liters)) + ' л', 'выгрузок: ' + d.period_count, 'report'),
+      d.orders ? tile('Заказы на сегодня', d.orders.new + d.orders.done + d.orders.failed, `выполнено ${d.orders.done}, у водителей ${d.orders.new}` + (d.orders.failed ? `, не выполнено ${d.orders.failed}` : ''), 'orders', d.orders.failed > 0) : null,
+      d.on_road !== null ? tile('Машин в рейсе', d.on_road, 'уехали с базы и не вернулись', 'map') : null,
+      tile('Ждут счёта', d.invoices, 'выгрузок у юрлиц', 'notices', d.invoices > 0),
+      tile('Не оплачено', d.unpaid, 'выгрузок у частных лиц', 'notices', d.unpaid > 0)),
+    el('div', { class: 'dash' },
+      el('div', { class: 'card wide' }, el('h2', null, 'Слито по дням, литров'), dayChart(d.days)),
+      el('div', { class: 'card' }, el('h2', null, 'Клиенты за 14 дней, литров'), hbars(d.clients, 'chart-clients')),
+      el('div', { class: 'card' }, el('h2', null, 'Водители за 14 дней, литров'), hbars(d.drivers, 'chart-drivers'))));
 }
 
 // ----- уведомления -----
@@ -263,7 +427,7 @@ async function renderNotices() {
           el('td', null, el('button', { onclick: act(`/api/logist/legs/${g.id}/done`) }, 'Разобрано')))))))
         : el('p', { class: 'empty' }, 'Расхождений нет.')),
     el('section', null, el('h2', null, 'Счета клиентам'),
-      el('div', { class: 'controls' }, el('nav', null, switchTo('pending'), switchTo('done'))),
+      el('div', { class: 'controls' }, el('div', { class: 'seg' }, switchTo('pending'), switchTo('done'))),
       data.invoices.length ? el('div', { class: 'scroll' }, el('table', { id: 'invoices' },
         el('thead', null, el('tr', null, ['Выгрузка', 'Клиент'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Литры'), ['Менеджер', 'Водитель', pending ? '' : 'Выставлен', ''].map((t) => el('th', null, t)))),
         el('tbody', null, data.invoices.map((i) => el('tr', null, el('td', null, when(i.ts)),
@@ -397,16 +561,15 @@ async function renderWeighings() {
 }
 
 // ----- карта -----
-let map = null;
+let map = null;        // { kit: 'osm' | 'yandex', obj, marks, fitted }
 let mapTimer = null;
-let markers = [];
-let mapFitted = false;
 function stopMap() {
   clearInterval(mapTimer);
   mapTimer = null;
-  if (map) { map.stop(); map.remove(); map = null; }
-  markers = [];
-  mapFitted = false;
+  if (map) {
+    try { if (map.kit === 'osm') { map.obj.stop(); map.obj.remove(); } else { map.obj.destroy(); } } catch (e) { /* карта уже убрана */ }
+    map = null;
+  }
 }
 function renderMap() {
   return el('div', null,
@@ -425,56 +588,99 @@ function carCard(v) {
     v.address ? el('p', null, el('small', null, v.address)) : null,
     el('p', null, el('small', null, 'Данные от ' + (v.time ? new Date(v.time).toLocaleString('ru-RU') : 'неизвестно'))));
 }
+const clientCard = (c, fuzzy) => el('div', null, el('b', null, c.name), el('br'), c.address, fuzzy ? [el('br'), el('small', { class: 'bad' }, 'Адрес найден неточно')] : null);
+// Два вида карты с одинаковым набором действий: OpenStreetMap (Leaflet) и Яндекс Карты
+const kits = {
+  osm: {
+    create() {
+      const obj = L.map('map', { fadeAnimation: false, markerZoomAnimation: false }).setView([45.04, 41.97], 7);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; участники OpenStreetMap' }).addTo(obj);
+      return obj;
+    },
+    clear(m) { m.marks.forEach((x) => x.remove()); },
+    car(m, v) {
+      return L.marker([v.lat, v.lon], { icon: L.divIcon({ className: 'car-mark' + (v.stale ? ' old' : ''), html: el('span', null, v.plate), iconSize: null }), title: v.plate })
+        .addTo(m.obj).bindPopup(carCard(v), { autoPan: false });
+    },
+    client(m, c, fuzzy) {
+      return L.circleMarker([c.lat, c.lon], { radius: 6, color: fuzzy ? '#b3261e' : '#14663c', weight: 2, fillOpacity: 0.5 }).addTo(m.obj).bindPopup(clientCard(c, fuzzy), { autoPan: false });
+    },
+    base(m, b) { return L.circleMarker([b.lat, b.lon], { radius: 9, color: '#15202b', weight: 3, fillOpacity: 0.8 }).addTo(m.obj).bindPopup('База', { autoPan: false }); },
+    isOpen(mark) { return mark.isPopupOpen(); },
+    open(mark) { mark.openPopup(); },
+    focus(m, mark, point) { m.obj.setView(point, Math.max(m.obj.getZoom(), 11), { animate: false }); mark.openPopup(); },
+    fit(m, points) { m.obj.fitBounds(points, { padding: [40, 40], maxZoom: 12, animate: false }); },
+  },
+  yandex: {
+    create() {
+      return new ymaps.Map('map', { center: [45.04, 41.97], zoom: 7, controls: ['zoomControl', 'typeSelector', 'trafficControl'] });
+    },
+    clear(m) { m.obj.geoObjects.removeAll(); },
+    add(m, point, props, options) { const pm = new ymaps.Placemark(point, props, options); m.obj.geoObjects.add(pm); return pm; },
+    car(m, v) { return this.add(m, [v.lat, v.lon], { iconContent: v.plate, balloonContent: carCard(v).outerHTML, hintContent: v.plate }, { preset: v.stale ? 'islands#grayStretchyIcon' : 'islands#blueStretchyIcon' }); },
+    client(m, c, fuzzy) { return this.add(m, [c.lat, c.lon], { balloonContent: clientCard(c, fuzzy).outerHTML, hintContent: c.name }, { preset: fuzzy ? 'islands#redCircleDotIcon' : 'islands#darkGreenCircleDotIcon' }); },
+    base(m, b) { return this.add(m, [b.lat, b.lon], { balloonContent: 'База', hintContent: 'База' }, { preset: 'islands#blackHomeIcon' }); },
+    isOpen(mark) { return mark.balloon.isOpen(); },
+    open(mark) { mark.balloon.open(); },
+    focus(m, mark, point) { m.obj.setCenter(point, Math.max(m.obj.getZoom(), 11)); mark.balloon.open(); },
+    fit(m, points) {
+      const lats = points.map((p) => p[0]), lons = points.map((p) => p[1]);
+      m.obj.setBounds([[Math.min(...lats), Math.min(...lons)], [Math.max(...lats), Math.max(...lons)]], { checkZoomRange: true, zoomMargin: 40 });
+    },
+  },
+};
+let yandexLoading = null;
+function loadYandex(key) {
+  if (window.ymaps) return new Promise((ok) => ymaps.ready(ok));
+  if (!yandexLoading) {
+    yandexLoading = new Promise((ok, fail) => {
+      const tag = el('script', { src: 'https://api-maps.yandex.ru/2.1/?apikey=' + encodeURIComponent(key) + '&lang=ru_RU' });
+      tag.onload = () => (window.ymaps ? ymaps.ready(ok) : fail(new Error('нет ymaps')));
+      tag.onerror = () => { yandexLoading = null; fail(new Error('не загрузилась')); };
+      document.head.append(tag);
+    });
+  }
+  return yandexLoading;
+}
 async function updateMap() {
   const data = await api('/api/logist/map');
   if (tab !== 'map' || !map) return;
-  const opened = markers.find((m) => m.isPopupOpen() && m.options.title);
-  const openedPlate = opened ? opened.options.title : null;
-  markers.forEach((m) => m.remove());
-  markers = [];
-  document.getElementById('map-error').textContent = data.error || '';
+  const kit = kits[map.kit];
+  const opened = map.marks.find((x) => x.plate && kit.isOpen(x.mark));
+  kit.clear(map, map.marks.map((x) => x.mark));
+  map.marks = [];
+  document.getElementById('map-error').textContent = [map.note, data.error].filter(Boolean).join(' ');
   const items = [];
-  const bounds = [];
-  if (!data.configured) {
-    items.push(el('p', { class: 'note' }, 'Ставтрэк не подключён. Подключите его на вкладке «Ставтрэк», и машины появятся на карте.'));
-  }
+  const points = [];
+  if (!data.configured) items.push(el('p', { class: 'note' }, 'Ставтрэк не подключён. Подключите его на вкладке «Ставтрэк», и машины появятся на карте.'));
   for (const c of data.clients || []) {
     const fuzzy = !['exact', 'number', 'manual'].includes(c.geo_precision);
-    markers.push(L.circleMarker([c.lat, c.lon], { radius: 6, color: fuzzy ? '#b3261e' : '#14663c', weight: 2, fillOpacity: 0.5 })
-      .addTo(map).bindPopup(el('div', null, el('b', null, c.name), el('br'), c.address, fuzzy ? [el('br'), el('small', { class: 'bad' }, 'Адрес найден неточно')] : null), { autoPan: false }));
-    bounds.push([c.lat, c.lon]);
+    map.marks.push({ mark: kit.client(map, c, fuzzy) });
+    points.push([c.lat, c.lon]);
   }
-  if (data.base) {
-    markers.push(L.circleMarker([data.base.lat, data.base.lon], { radius: 9, color: '#101b25', weight: 3, fillOpacity: 0.8 }).addTo(map).bindPopup('База', { autoPan: false }));
-    bounds.push([data.base.lat, data.base.lon]);
-  }
+  if (data.base) { map.marks.push({ mark: kit.base(map, data.base) }); points.push([data.base.lat, data.base.lon]); }
   for (const v of data.vehicles) {
-    const marker = L.marker([v.lat, v.lon], {
-      icon: L.divIcon({ className: 'car-mark' + (v.stale ? ' old' : ''), html: el('span', null, v.plate), iconSize: null }), title: v.plate,
-    }).addTo(map).bindPopup(carCard(v), { autoPan: false });
-    markers.push(marker);
-    bounds.push([v.lat, v.lon]);
-    if (v.plate === openedPlate) marker.openPopup();
-    items.push(el('button', {
-      class: v.stale ? 'old' : 'live',
-      onclick: () => { map.setView(marker.getLatLng(), Math.max(map.getZoom(), 11), { animate: false }); marker.openPopup(); },
-    }, el('b', null, v.plate), v.driver || 'Водитель неизвестен', el('br'),
-    el('small', null, (v.stale ? 'Давно нет данных' : v.speed + ' км/ч') + `, заказов: ${v.orders.length}, слито ${fmt(v.today_l)} л`)));
+    const mark = kit.car(map, v);
+    map.marks.push({ mark, plate: v.plate });
+    points.push([v.lat, v.lon]);
+    if (opened && opened.plate === v.plate) kit.open(mark);
+    items.push(el('button', { class: v.stale ? 'old' : 'live', onclick: () => kit.focus(map, mark, [v.lat, v.lon]) },
+      el('b', null, v.plate), v.driver || 'Водитель неизвестен', el('br'),
+      el('small', null, (v.stale ? 'Давно нет данных' : v.speed + ' км/ч') + `, заказов: ${v.orders.length}, слито ${fmt(v.today_l)} л`)));
   }
-  if (data.unlinked.length) {
-    items.push(el('p', { class: 'note', id: 'unlinked' }, 'Нет на карте: ' + data.unlinked.join(', ') + '. Привяжите их к устройствам на вкладке «Ставтрэк».'));
-  }
+  if (data.unlinked.length) items.push(el('p', { class: 'note', id: 'unlinked' }, 'Нет на карте: ' + data.unlinked.join(', ') + '. Привяжите их к устройствам на вкладке «Ставтрэк».'));
   document.getElementById('fleet').replaceChildren(...items);
-  if (!mapFitted && bounds.length) {
-    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 12, animate: false });
-    mapFitted = true;
-  }
-  document.getElementById('map-state').textContent = 'Обновлено в ' + new Date().toLocaleTimeString('ru-RU') + '. Обновляется каждые 30 секунд.';
+  if (!map.fitted && points.length) { kit.fit(map, points); map.fitted = true; }
+  document.getElementById('map-state').textContent = (map.kit === 'yandex' ? 'Яндекс Карты. ' : '') + 'Обновлено в ' + new Date().toLocaleTimeString('ru-RU') + '. Обновляется каждые 30 секунд.';
 }
-function startMap() {
+async function startMap() {
   if (!document.getElementById('map')) return;
-  map = L.map('map', { fadeAnimation: false, markerZoomAnimation: false }).setView([45.04, 41.97], 7);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; участники OpenStreetMap' }).addTo(map);
+  let kit = 'osm', note = '';
+  if (me.map && me.map.provider === 'yandex') {
+    try { await loadYandex(me.map.key); kit = 'yandex'; } catch (e) { note = 'Яндекс Карты не загрузились (проверьте ключ и интернет), показана обычная карта.'; }
+  }
+  if (tab !== 'map' || !document.getElementById('map') || map) return;
+  map = { kit, obj: kits[kit].create(), marks: [], fitted: false, note };
   const refresh = () => updateMap().catch((err) => {
     const box = document.getElementById('map-error');
     if (box) box.textContent = err.message;
@@ -491,6 +697,8 @@ async function renderRouting() {
     { name: 'router_key', label: r.router_key_set ? 'Ключ Матрицы расстояний (пусто — не менять)' : 'Ключ Яндекс Матрицы расстояний', type: 'password' },
     { name: 'base_address', label: 'Адрес базы, откуда выезжают машины', value: r.base_address, maxlength: 300 },
     { name: 'base_coords', label: 'Координаты базы вручную: широта, долгота (необязательно)', value: r.base_precision === 'manual' ? `${r.base_lat}, ${r.base_lon}` : '', maxlength: 60 },
+    { name: 'map_provider', label: 'Карта в кабинете', value: r.map_provider, options: [{ value: 'osm', label: 'OpenStreetMap (без ключа)' }, { value: 'yandex', label: 'Яндекс Карты (нужен ключ JavaScript API)' }] },
+    { name: 'map_key', label: r.map_key_set ? 'Ключ JavaScript API Яндекс Карт (пусто — не менять)' : 'Ключ JavaScript API Яндекс Карт', type: 'password' },
     { name: 'mode', label: 'Какие дороги учитывать', value: r.mode, options: [{ value: 'truck', label: 'Для грузовых машин' }, { value: 'driving', label: 'Для легковых машин' }] },
     { name: 'has_trailer', label: 'Прицеп', value: r.has_trailer ? '1' : '0', options: [{ value: '1', label: 'Считать с прицепом' }, { value: '0', label: 'Без прицепа' }] },
   ], 'Сохранить', (v) => api('/api/logist/routing', 'POST', { ...v, has_trailer: v.has_trailer === '1' }));
@@ -501,6 +709,7 @@ async function renderRouting() {
     el('table', { id: 'routing-state' }, el('tbody', null,
       el('tr', null, el('th', null, 'Ключ Геокодера'), el('td', null, r.geocoder_key_set ? 'Задан' : el('span', { class: 'bad' }, 'Не задан'))),
       el('tr', null, el('th', null, 'Ключ Матрицы расстояний'), el('td', null, r.router_key_set ? 'Задан' : el('span', { class: 'bad' }, 'Не задан'))),
+      el('tr', null, el('th', null, 'Карта в кабинете'), el('td', { id: 'map-kind' }, r.map_provider === 'yandex' ? (r.map_key_set ? 'Яндекс Карты' : el('span', { class: 'bad' }, 'Яндекс Карты выбраны, но ключ не задан — показывается OpenStreetMap')) : 'OpenStreetMap')),
       el('tr', null, el('th', null, 'База'), el('td', null, r.base_lat === null ? el('span', { class: 'bad' }, 'Адрес не задан') : [r.base_address || 'Координаты заданы вручную', el('br'),
         el('small', { class: precise ? null : 'bad' }, `${r.base_lat}, ${r.base_lon}` + (r.base_text ? '. Найдено: ' + r.base_text : '') + (precise ? '' : '. Найдено неточно, проверьте на карте'))])))));
 }
@@ -524,13 +733,40 @@ async function renderStavtrack() {
   const link = (v) => form('Устройство для ' + v.plate, [{ name: 'device_id', label: 'Устройство в Ставтрэке', value: '',
     options: [{ value: '', label: 'Определять по госномеру' }].concat(stCheck.devices.map((d) => ({ value: d.id, label: d.name }))) }],
   'Сохранить', async (x) => { await api('/api/logist/stavtrack/link', 'POST', { plate: v.plate, device_id: x.device_id ? Number(x.device_id) : null }); stCheck = await api('/api/logist/stavtrack/check'); });
+  const importCars = async () => {
+    let list;
+    try { list = await api('/api/logist/stavtrack/import'); } catch (err) { stCheck = { error: err.message }; render(); return; }
+    const error = el('div', { class: 'error', role: 'alert' });
+    const rows = list.map((d) => ({ d, on: el('input', { type: 'checkbox', checked: !!d.plate, 'aria-label': 'Загрузить ' + d.name }), plate: el('input', { type: 'text', value: d.plate, 'aria-label': 'Госномер для ' + d.name }),
+      kind: el('select', { 'aria-label': 'Тип для ' + d.name }, el('option', { value: '' }, 'Одиночка'), el('option', { value: 'tractor' }, 'Тягач')) }));
+    dlg.className = 'wide';
+    dlg.replaceChildren(el('form', {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const items = rows.filter((r) => r.on.checked).map((r) => ({ device_id: r.d.device_id, name: r.d.name, plate: r.plate.value, kind: r.kind.value }));
+        try { const res = await api('/api/logist/stavtrack/import', 'POST', { items }); dlg.close(); stCheck = { info: `Загружено машин: ${res.added}, привязано устройств: ${res.linked}.` }; render(); }
+        catch (err) { error.textContent = err.message; }
+      },
+    }, el('h2', null, 'Машины из Ставтрэка'),
+    list.length ? [el('p', { class: 'note' }, 'Отметьте машины, проверьте госномер и тип. Прицепы и тару добавляют в программе оператора, вкладка «ТС».'),
+      el('div', { class: 'pick-list' }, el('table', { id: 'st-import-table' },
+        el('thead', null, el('tr', null, el('th', null, ''), el('th', null, 'Устройство в Ставтрэке'), el('th', null, 'Госномер'), el('th', null, 'Тип'))),
+        el('tbody', null, rows.map((r) => el('tr', null, el('td', null, r.on), el('td', null, r.d.name), el('td', null, r.plate), el('td', null, r.kind))))))]
+      : el('p', { class: 'empty' }, 'Все устройства Ставтрэка уже есть в справочнике машин.'),
+    error,
+    el('div', { class: 'row-end' }, el('button', { type: 'button', onclick: () => dlg.close() }, 'Отмена'),
+      list.length ? el('button', { type: 'submit', class: 'primary' }, 'Загрузить отмеченные') : null)));
+    dlg.showModal();
+  };
   return el('div', null,
     el('div', { class: 'controls' },
       el('button', { class: 'primary', id: 'st-setup', onclick: setup }, 'Подключение'),
       el('button', { id: 'st-check', onclick: check }, 'Проверить связь и ДУТ'),
+      el('button', { id: 'st-import', onclick: importCars }, 'Загрузить машины из Ставтрэка'),
       el('span', { id: 'st-state' }, s.enabled && s.password_set ? 'Топливо запрашивается при каждом взвешивании' : 'Выключено')),
     el('p', { class: 'note' }, 'При взвешивании программа запрашивает у Ставтрэка уровень топлива по ДУТ. В сверке с весами топливо, сожжённое за рейс, вычитается из «отвезённого газа».'),
     stCheck && stCheck.error ? el('div', { class: 'error', role: 'alert', id: 'st-error' }, stCheck.error) : null,
+    stCheck && stCheck.info ? el('p', { class: 'good', id: 'st-info' }, stCheck.info) : null,
     stCheck && stCheck.vehicles ? el('div', { class: 'scroll' }, el('table', { id: 'st-table' },
       el('thead', null, el('tr', null, ['Машина', 'Устройство в Ставтрэке'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Топливо сейчас, л'), ['Замечание', ''].map((t) => el('th', null, t)))),
       el('tbody', null, stCheck.vehicles.map((v) => el('tr', null, el('td', null, v.plate), el('td', null, v.device || el('span', { class: 'bad' }, 'не найдено')),

@@ -727,7 +727,54 @@ def build_routes(ctx, public: bool) -> list[Route]:
     async def logist_me(request: Request):
         u = staff(request)
         return JSONResponse({"login": u["login"], "name": u["name"], "admin": bool(u["admin"]), "role": u["role"],
-                             "notices": notice_count(own(u)), "tolerance": lcfg(), "push": pusher.ready()})
+                             "notices": notice_count(own(u)), "tolerance": lcfg(), "push": pusher.ready(),
+                             "map": map_settings() if u["role"] == "logist" else None})
+
+    def map_settings() -> dict:
+        s_ = routing.settings()
+        yandex = s_["map_provider"] == "yandex" and bool(s_["map_key"])
+        # Ключ JavaScript API Яндекс Карт по своей природе виден в браузере; его ограничивают по адресу сайта
+        return {"provider": "yandex" if yandex else "osm", "key": s_["map_key"] if yandex else ""}
+
+    @handler
+    async def dashboard(request: Request):
+        """Сводка для главной страницы кабинета: объёмы по дням, клиенты, водители, заказы."""
+        u = staff(request)
+        owner = own(u)
+        mine, margs = ("", ()) if owner is None else (" AND c.manager_id=?", (owner,))
+        days = 14
+        now = datetime.now()
+        start = (now - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        today = now.strftime("%Y-%m-%d")
+        base = ("FROM unloads u JOIN clients c ON c.id=u.client_id WHERE u.deleted IS NULL AND u.ts>=?" + mine)
+        per_day = {r["d"]: r for r in db.q(
+            f"SELECT substr(u.ts,1,10) AS d, SUM(u.liters) AS l, COUNT(*) AS n {base} GROUP BY d", (start, *margs))}
+        series = []
+        for i in range(days):
+            d = (now - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+            row = per_day.get(d)
+            series.append({"day": d, "liters": round(row["l"], 2) if row else 0, "count": row["n"] if row else 0})
+
+        def top(col):
+            return [{"name": r["label"] or "Не указан", "liters": round(r["l"], 2), "count": r["n"]} for r in db.q(
+                f"SELECT {col} AS label, SUM(u.liters) AS l, COUNT(*) AS n {base} GROUP BY {col} ORDER BY l DESC LIMIT 8",
+                (start, *margs))]
+        out = {"days": series, "clients": top("c.name"), "drivers": top("u.driver"),
+               "today": series[-1], "period_liters": round(sum(x["liters"] for x in series), 2),
+               "period_count": sum(x["count"] for x in series),
+               "invoices": db.q("SELECT COUNT(*) AS n FROM unloads u JOIN clients c ON c.id=u.client_id WHERE "
+                                "u.deleted IS NULL AND u.invoice='pending'" + mine, margs)[0]["n"],
+               "unpaid": db.q("SELECT COUNT(*) AS n FROM unloads u JOIN clients c ON c.id=u.client_id WHERE "
+                              "u.deleted IS NULL AND u.paid='no'" + mine, margs)[0]["n"], "orders": None, "on_road": None}
+        if owner is None:
+            st_ = {r["status"]: r["n"] for r in db.q(
+                "SELECT status, COUNT(*) AS n FROM orders WHERE day=? GROUP BY status", (today,))}
+            out["orders"] = {"new": st_.get("new", 0), "done": st_.get("done", 0), "failed": st_.get("failed", 0)}
+            c = lcfg()
+            since = (now - timedelta(days=3)).isoformat(timespec="seconds")
+            out["on_road"] = sum(1 for g in legs(db, density(), c["tolerance_pct"], c["tolerance_l"], since)
+                                 if g["status"] == "open")
+        return JSONResponse(out)
 
     def period(request: Request) -> tuple[str, str]:
         q = request.query_params
@@ -1141,8 +1188,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
         admin_of(request)
         if request.method == "POST":
             b = await body(request)
-            new = {"mode": "driving" if b.get("mode") == "driving" else "truck", "has_trailer": bool(b.get("has_trailer"))}
-            for key in ("geocoder_key", "router_key"):
+            new = {"mode": "driving" if b.get("mode") == "driving" else "truck", "has_trailer": bool(b.get("has_trailer")),
+                   "map_provider": "yandex" if b.get("map_provider") == "yandex" else "osm"}
+            for key in ("geocoder_key", "router_key", "map_key"):
                 if b.get(key):
                     new[key] = text(b[key], "Ключ", 200)
             routing.save(new)
@@ -1167,7 +1215,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         return JSONResponse({"geocoder_key_set": bool(s_["geocoder_key"]), "router_key_set": bool(s_["router_key"]),
                              "base_address": s_["base_address"], "base_lat": s_["base_lat"], "base_lon": s_["base_lon"],
                              "base_precision": base["precision"], "base_text": base["text"],
-                             "mode": s_["mode"], "has_trailer": s_["has_trailer"]})
+                             "mode": s_["mode"], "has_trailer": s_["has_trailer"],
+                             "map_provider": s_["map_provider"], "map_key_set": bool(s_["map_key"])})
 
     @handler
     async def order_cancel(request: Request):
@@ -1236,6 +1285,48 @@ def build_routes(ctx, public: bool) -> list[Route]:
             return JSONResponse(await loop.run_in_executor(None, work))
         except StError as ex:
             raise Bad(str(ex), 502) from ex
+
+    def plate_guess(name: str) -> str:
+        clean = re.sub(r"[\s\-_]+", "", name).upper().translate(str.maketrans("ABEKMHOPCTYX", "АВЕКМНОРСТУХ"))
+        found = re.search(r"[А-Я]\d{3}[А-Я]{2}\d{2,3}", clean)
+        return norm_plate(found.group(0))[0] if found else ""
+
+    @handler
+    async def stavtrack_import(request: Request):
+        """Загрузка машин из Ставтрэка в справочник ТС."""
+        admin_of(request)
+        loop = asyncio.get_running_loop()
+        try:
+            devs = await loop.run_in_executor(None, stv.devices)
+        except StError as ex:
+            raise Bad(str(ex), 502) from ex
+        if request.method == "GET":
+            linked = {r["device_id"] for r in db.q("SELECT device_id FROM st_links")}
+            auto = set()
+            for v in db.vehicles():
+                d = stv.device_for(v["plate"])
+                if d:
+                    auto.add(d["id"])
+            return JSONResponse([{"device_id": d["id"], "name": d["name"], "plate": plate_guess(d["name"])}
+                                 for d in devs if d["id"] not in linked and d["id"] not in auto])
+        items = (await body(request)).get("items")
+        if not isinstance(items, list) or not items:
+            raise Bad("Отметьте хотя бы одну машину")
+        known = {d["id"] for d in devs}
+        added = 0
+        for it in items:
+            plate = norm_plate(str(it.get("plate") or ""))[0]
+            if len(plate) < 6:
+                raise Bad(f"Укажите госномер для «{it.get('name') or it.get('device_id')}»")
+            if it.get("device_id") not in known:
+                raise Bad("Устройство не найдено в Ставтрэке")
+            if not db.vehicle(plate):        # существующую машину не трогаем, только привязываем
+                db.save_vehicle({"plate": plate, "kind": "tractor" if it.get("kind") == "tractor" else "",
+                                 "model": " ".join(str(it.get("name") or "").split())[:60]})
+                added += 1
+            db.x("INSERT INTO st_links(plate, device_id) VALUES(?,?) "
+                 "ON CONFLICT(plate) DO UPDATE SET device_id=excluded.device_id", (plate, it["device_id"]))
+        return JSONResponse({"ok": True, "added": added, "linked": len(items)})
 
     @handler
     async def stavtrack_link(request: Request):
@@ -1392,6 +1483,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/map", map_api),
         Route("/api/logist/stavtrack", stavtrack_api, methods=["GET", "POST"]),
         Route("/api/logist/stavtrack/check", stavtrack_check),
+        Route("/api/logist/stavtrack/import", stavtrack_import, methods=["GET", "POST"]),
+        Route("/api/logist/dashboard", dashboard),
         Route("/api/logist/stavtrack/link", stavtrack_link, methods=["POST"]),
         Route("/api/logist/photo/{path:path}", logist_photo),
         Route("/api/logist/invoices/{uid}/done", invoice_mark_as("done"), methods=["POST"]),

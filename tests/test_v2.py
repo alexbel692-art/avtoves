@@ -384,6 +384,17 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         desk.fill("#l-login", "olga")
         desk.fill("#l-pass", "parol-logista")
         desk.click("#l-enter")
+        # Сводка: показатели и диаграммы
+        expect(desk.locator("main h1")).to_have_text("Сводка")
+        expect(desk.locator("#tiles")).to_contain_text("Ждут счёта")
+        expect(desk.locator("#chart-days path.bar")).to_have_count(14)
+        expect(desk.locator("#chart-clients .fill")).to_have_count(3)
+        expect(desk.locator("#chart-drivers .name")).to_have_text(["Иванов Сергей"])
+        desk.locator("#chart-days .hit").last.hover()
+        expect(desk.locator(".tip")).to_contain_text("выгрузок: 3")
+        desk.screenshot(path=SHOTS / "home.png")
+        desk.click("#tiles button:has-text('Ждут счёта')")       # плитка ведёт в нужный раздел
+        expect(desk.locator("main h1")).to_have_text("Уведомления")
         expect(desk.locator("nav [data-tab=notices]")).to_have_text("Уведомления (3)")
         expect(desk.locator("#unpaid")).to_contain_text("Петров И. И.")
         expect(desk.locator("#new-clients")).to_contain_text("ИП Смирнов")
@@ -668,6 +679,24 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     assert [(o["client"], o["liters"]) for o in car["orders"]] == [("АГЗС Север", 5000.0)]
     assert call(public, "/api/logist/map", token=token)[0] == 401
 
+    # Сводка для диаграмм; загрузка машин из Ставтрэка в справочник
+    d = call(public, "/api/logist/dashboard", token=logist)[1]
+    assert len(d["days"]) == 14 and d["today"]["liters"] == 24000.0 and d["period_count"] == 1
+    assert d["clients"][0]["liters"] == 24000.0 and d["drivers"] == [{"name": "Иванов Сергей", "liters": 24000.0, "count": 1}]
+    assert d["orders"] == {"new": 1, "done": 0, "failed": 0}
+    assert call(public, "/api/logist/dashboard", token=token)[0] == 401
+    assert call(public, "/api/logist/stavtrack/import", token=token)[0] == 401
+    assert call(public, "/api/logist/stavtrack/import", token=logist)[1] == [{"device_id": 12, "name": "Легковая", "plate": ""}]
+    code, res = call(public, "/api/logist/stavtrack/import", "POST", {"items": [{"device_id": 12, "name": "Легковая", "plate": ""}]}, logist)
+    assert code == 400 and "госномер" in res["error"]
+    res = call(public, "/api/logist/stavtrack/import", "POST", {"items": [{"device_id": 12, "name": "Легковая", "plate": "в222вв26", "kind": ""}]}, logist)[1]
+    assert res == {"ok": True, "added": 1, "linked": 1}
+    car2 = ctx.db.vehicle("В222ВВ26")
+    assert (car2["model"], car2["kind"]) == ("Легковая", "") and ctx.stavtrack.device_for("В222ВВ26")["id"] == 12
+    assert call(public, "/api/logist/stavtrack/import", token=logist)[1] == []
+    ctx.db.x("DELETE FROM st_links WHERE plate='В222ВВ26'")
+    ctx.db.x("DELETE FROM vehicles WHERE plate='В222ВВ26'")
+
     # Устаревшие данные трекера в расчёт не идут, но видны с пометкой
     fake.age_min = 60
     weigh(ctx, public, token, "departure", 28500, t0 + timedelta(hours=5))
@@ -715,8 +744,70 @@ def test_map_in_browser(env):
         page.click("nav [data-tab=report]")       # уход с карты не оставляет ошибок
         page.click("nav [data-tab=map]")
         expect(page.locator(".car-mark")).to_have_count(1)
+
+        # Загрузка машин из Ставтрэка: окно со списком устройств
+        page.click("nav [data-tab=stavtrack]")
+        page.click("#st-import")
+        expect(page.locator("#st-import-table tbody tr")).to_have_count(1)
+        page.fill("#st-import-table input[type=text]", "В222ВВ26")
+        page.check("#st-import-table input[type=checkbox]")
+        page.screenshot(path=SHOTS / "import.png")
+        page.click("dialog button[type=submit]")
+        expect(page.locator("#st-info")).to_contain_text("Загружено машин: 1")
+        assert ctx.db.vehicle("В222ВВ26")["model"] == "Легковая"
+
+        # Яндекс Карты вместо OpenStreetMap: ключ задан — карта рисуется через их программу
+        res = call(public, "/api/logist/routing", "POST", {"map_provider": "yandex", "map_key": "map-key", "mode": "truck", "has_trailer": True}, logist)[1]
+        assert res["map_provider"] == "yandex" and res["map_key_set"] is True and "map_key" not in res
+        assert call(public, "/api/logist/me", token=logist)[1]["map"] == {"provider": "yandex", "key": "map-key"}
+        asked = []
+
+        def ymaps_stub(route):
+            asked.append(route.request.url)
+            route.fulfill(content_type="application/javascript", body=YMAPS_STUB)
+        page.route("https://api-maps.yandex.ru/**", ymaps_stub)
+        page.reload()
+        page.click("nav [data-tab=map]")
+        expect(page.locator("#map-state")).to_contain_text("Яндекс Карты")
+        expect(page.locator("#map .ym-mark")).to_have_count(2)       # две машины
+        assert asked == ["https://api-maps.yandex.ru/2.1/?apikey=map-key&lang=ru_RU"]
+        page.click("#fleet button:has-text('Т100АА26')")
+        expect(page.locator("#map .ym-open")).to_contain_text("Иванов Сергей")
+        page.click("nav [data-tab=report]")
+        page.click("nav [data-tab=map]")
+        expect(page.locator("#map .ym-mark")).to_have_count(2)
         assert errors == []
         browser.close()
+
+
+# Заглушка программы Яндекс Карт (API 2.1): только то, чем пользуется кабинет
+YMAPS_STUB = """
+window.ymaps = {
+  ready(fn) { if (fn) fn(); return Promise.resolve(); },
+  Map: function (id) {
+    const box = document.getElementById(id);
+    const self = this;
+    this.zoom = 7;
+    this.geoObjects = {
+      add(pm) { const n = document.createElement('div'); n.className = 'ym-mark'; n.textContent = pm.props.iconContent || pm.props.hintContent; box.append(n); pm.node = n; pm.box = box; },
+      removeAll() { box.replaceChildren(); },
+    };
+    this.getZoom = () => self.zoom;
+    this.setCenter = (c, z) => { self.zoom = z; };
+    this.setBounds = () => {};
+    this.destroy = () => box.replaceChildren();
+  },
+  Placemark: function (point, props, options) {
+    const pm = this;
+    this.props = props;
+    this.opened = false;
+    this.balloon = {
+      isOpen: () => pm.opened,
+      open() { pm.opened = true; const n = document.createElement('div'); n.className = 'ym-open'; n.innerHTML = props.balloonContent; pm.box.append(n); },
+    };
+  },
+};
+"""
 
 
 class FakeYandex:
