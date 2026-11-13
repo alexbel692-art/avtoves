@@ -12,7 +12,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -416,6 +416,15 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         desk.screenshot(path=SHOTS / "legs.png")
         desk.click("nav [data-tab=drivers]")
         expect(desk.locator("#drivers tbody tr")).to_have_count(2)
+        desk.click("nav [data-tab=stavtrack]")
+        expect(desk.locator("#st-state")).to_have_text("Выключено")
+        desk.click("#st-check")
+        expect(desk.locator("#st-error")).to_contain_text("логин и пароль")
+        desk.click("#st-setup")
+        expect(desk.locator("dialog input[name=url]")).to_have_value("https://wiafleet.online/api")
+        desk.click("dialog button:has-text('Отмена')")
+        desk.click("nav [data-tab=legs]")
+        expect(desk.locator("#legs thead")).to_contain_text("Топливо, л")
         desk.click("nav [data-tab=logists]")
         expect(desk.locator("#logists")).to_contain_text("Логист-администратор")
         small = browser.new_page(viewport={"width": 390, "height": 800})
@@ -532,3 +541,117 @@ def test_weighing_photos_in_cabinet(env):
     assert code == 200 and data == b"\xff\xd8jpeg"
     assert call(public, w["photos"][0].split("?")[0] + "?t=" + token)[0] == 401
     assert call(public, f"/api/logist/photo/{day}/../../t.db?t={logist}")[0] in (400, 404)
+
+
+class FakeWiaFleet:
+    """Вместо Ставтрэка: те же адреса и формат ответов, что в его описании API."""
+
+    def __init__(self):
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse, Response
+        from starlette.routing import Route
+        self.fuel = 400.0
+        self.age_min = 0
+        self.expire_once = False
+        self.logins = 0
+
+        def authed(request):
+            if self.expire_once:
+                self.expire_once = False
+                return False
+            return request.headers.get("authorization") == f"Bearer tok{self.logins}"
+
+        async def token(request):
+            b = await request.json()
+            if b != {"email": "ves@example.ru", "password": "st-parol"}:
+                return Response("bad", 401)
+            self.logins += 1
+            return JSONResponse({"token": {"token": f"tok{self.logins}", "refreshToken": "r", "exp": "2030-01-01T00:00:00Z"}})
+
+        async def devices(request):
+            if not authed(request):
+                return Response("", 401)
+            return JSONResponse([{"id": 11, "name": "Вольво T100AA26"}, {"id": 12, "name": "Легковая"}])
+
+        async def sensors(request):
+            if not authed(request):
+                return Response("", 401)
+            if request.path_params["d"] != 11:
+                return JSONResponse([])
+            return JSONResponse([{"id": 5, "deviceId": 11, "name": "ДУТ бак", "type": "fuel", "param": "fuel1"},
+                                 {"id": 6, "deviceId": 11, "name": "Зажигание", "type": "ignition", "param": "ign"}])
+
+        async def positions(request):
+            if not authed(request):
+                return Response("", 401)
+            if request.query_params["deviceIds"] != "11":
+                return JSONResponse([{"deviceId": 12, "deviceTime": "2026-01-01T00:00:00Z", "sensorsAttributes": {}}])
+            when = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=self.age_min)
+            return JSONResponse([{"deviceId": 11, "deviceTime": when.isoformat(timespec="seconds") + "Z",
+                                  "latitude": 45.0, "longitude": 42.0,
+                                  "sensorsAttributes": {"ДУТ бак": self.fuel, "Зажигание": True}}])
+
+        app = Starlette(routes=[Route("/api/session/token", token, methods=["POST"]), Route("/api/devices", devices),
+                                Route("/api/devices/{d:int}/sensors", sensors), Route("/api/positions", positions)])
+        self.server, base = serve(app)
+        self.url = base + "/api"
+
+
+def wait_fuel(ctx, n):
+    for _ in range(150):
+        rows = ctx.db.q("SELECT * FROM weigh_fuel ORDER BY weighing_id")
+        if len(rows) >= n:
+            return rows
+        time.sleep(0.02)
+    raise AssertionError(rows)
+
+
+def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
+    ctx, local, public, logist = env
+    fake = FakeWiaFleet()
+    token = driver_token(public)
+    cfg = {"enabled": True, "url": fake.url, "email": "ves@example.ru", "password": "wrong", "fuel_density": "0,84", "max_age_min": 15}
+    # Неверный пароль: понятная ошибка; пароль обратно не отдаётся; менеджеру и водителю настройки закрыты
+    res = call(public, "/api/logist/stavtrack", "POST", cfg, logist)[1]
+    assert res["password_set"] is True and "password" not in res
+    code, res = call(public, "/api/logist/stavtrack/check", token=logist)
+    assert code == 502 and "логин или пароль" in res["error"]
+    assert call(public, "/api/logist/stavtrack", token=token)[0] == 401
+    call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "st-parol"}, logist)
+    check = call(public, "/api/logist/stavtrack/check", token=logist)[1]
+    assert "vehicles" in check, check
+    assert check["vehicles"] == [{"plate": "Т100АА26", "device": "Вольво T100AA26", "liters": 400.0, "age_s": check["vehicles"][0]["age_s"],
+                                  "note": "", "sensors": ["ДУТ бак", "Зажигание"], "linked": False}]
+
+    t0 = datetime.now() - timedelta(hours=6)
+    weigh(ctx, public, token, "arrival", 15000, t0)
+    fake.expire_once = True                      # токен истёк: программа входит заново сама
+    weigh(ctx, public, token, "departure", 28500, t0 + timedelta(hours=1))      # 25 000 л газа, в баке 400 л
+    assert [r["liters"] for r in wait_fuel(ctx, 2)] == [400.0, 400.0]
+    unload(public, token, "f1", 24000, t0 + timedelta(hours=2), {"client_id": 2})
+    # За рейс сожгли 100 л солярки (84 кг): без поправки весы приписали бы это газу
+    fake.fuel = 300.0
+    weigh(ctx, public, token, "arrival", 15456 - 84, t0 + timedelta(hours=4))
+    wait_fuel(ctx, 3)
+    q = f"?from={t0:%Y-%m-%d}&to={datetime.now():%Y-%m-%d}"
+    [leg] = call(public, "/api/logist/legs" + q, token=logist)[1]
+    assert (leg["fuel_out"], leg["fuel_in"], leg["fuel_fix_l"]) == (400.0, 300.0, 156)
+    assert (leg["out_l"], leg["in_l"], leg["scale_l"], leg["diff_l"], leg["status"]) == (25000, 689, 24155, 155, "ok")
+    ws = call(public, "/api/logist/weighings" + q, token=logist)[1]
+    assert [w["fuel"] for w in ws] == [300.0, 400.0, 400.0]
+
+    # Устаревшие данные трекера в расчёт не идут, но видны с пометкой
+    fake.age_min = 60
+    weigh(ctx, public, token, "departure", 28500, t0 + timedelta(hours=5))
+    last = wait_fuel(ctx, 4)[-1]
+    assert last["liters"] is None and "устарели" in last["note"] and "300" in last["note"]
+    # Ручная привязка к другому устройству: у него нет ДУТ
+    call(public, "/api/logist/stavtrack/link", "POST", {"plate": "Т100АА26", "device_id": 12}, logist)
+    v = call(public, "/api/logist/stavtrack/check", token=logist)[1]["vehicles"][0]
+    assert v["device"] == "Легковая" and v["liters"] is None and v["linked"] is True
+    # Ставтрэк недоступен: взвешивание всё равно проходит
+    fake.server.should_exit = True
+    time.sleep(0.3)
+    ctx.stavtrack.save({})
+    weigh(ctx, public, token, "arrival", 15500, t0 + timedelta(hours=5, minutes=30))
+    assert "Ставтрэк" in wait_fuel(ctx, 5)[-1]["note"]

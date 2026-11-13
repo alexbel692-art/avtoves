@@ -151,12 +151,12 @@ async function render() {
     const manager = me.role === 'manager';
     const badge = 'Уведомления' + (me.notices ? ` (${me.notices})` : '');
     const tabs = manager ? [['notices', badge], ['report', 'Выгрузки'], ['logists', 'Мой пароль']]
-      : [['notices', badge], ['orders', 'Заказы'], ['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания'], ['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']];
+      : [['notices', badge], ['orders', 'Заказы'], ['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания'], ['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']].concat(me.admin ? [['stavtrack', 'Ставтрэк']] : []);
     if (!tabs.some(([id]) => id === tab)) tab = 'notices';
     const head = el('header', null, el('h1', null, manager ? 'АвтоВес: менеджер' : 'АвтоВес: логист'),
       el('nav', null, tabs.map(([id, name]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, name))),
       el('button', { id: 'logout', onclick: () => { setToken(null); render(); } }, 'Выйти (' + me.login + ')'));
-    const body = await ({ notices: renderNotices, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists })[tab]();
+    const body = await ({ notices: renderNotices, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack })[tab]();
     if (run !== renderCount) return;
     view.replaceChildren(head, body);
   } catch (err) {
@@ -357,12 +357,47 @@ async function renderWeighings() {
       el('label', null, 'С даты', el('input', { type: 'date', value: weighFilter.from, onchange: set('from') })),
       el('label', null, 'По дату', el('input', { type: 'date', value: weighFilter.to, onchange: set('to') }))),
     rows.length ? el('div', { class: 'scroll' }, el('table', { id: 'weighings' },
-      el('thead', null, el('tr', null, ['Время', 'Машина', 'Что', 'Водитель'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Вес, кг'), el('th', null, 'Фото'))),
+      el('thead', null, el('tr', null, ['Время', 'Машина', 'Что', 'Водитель'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Вес, кг'), el('th', { class: 'num' }, 'Топливо по ДУТ, л'), el('th', null, 'Фото'))),
       el('tbody', null, rows.map((w) => el('tr', null, el('td', null, when(w.ts)), el('td', null, w.plate + (w.trailer ? ' + ' + w.trailer : '')),
         el('td', null, { arrival: 'Приехал на базу', departure: 'Уехал с базы' }[w.kind] || 'Взвешивание'), el('td', null, w.driver || (w.source === 'driver' ? '' : 'оператор')),
         el('td', { class: 'num' }, fmt(w.weight)),
+        el('td', { class: 'num' }, w.fuel !== null && w.fuel !== undefined ? fmt(w.fuel) : el('small', null, w.fuel_note)),
         el('td', null, w.photos.length ? el('button', { onclick: () => showPhotos(w) }, 'Смотреть (' + w.photos.length + ')') : el('span', { class: 'bad' }, 'нет фото')))))))
       : el('p', { class: 'empty' }, 'За эти дни взвешиваний нет.'));
+}
+
+// ----- Ставтрэк -----
+let stCheck = null;
+async function renderStavtrack() {
+  const s = await api('/api/logist/stavtrack');
+  const setup = () => form('Подключение Ставтрэка', [
+    { name: 'enabled', label: 'Запрашивать топливо при взвешивании', value: s.enabled ? '1' : '0', options: [{ value: '1', label: 'Да' }, { value: '0', label: 'Нет' }] },
+    { name: 'url', label: 'Адрес API', value: s.url },
+    { name: 'email', label: 'Логин (почта) в Ставтрэке', value: s.email },
+    { name: 'password', label: s.password_set ? 'Пароль (пусто — не менять)' : 'Пароль', type: 'password' },
+    { name: 'fuel_density', label: 'Плотность топлива, кг/л', value: s.fuel_density, inputmode: 'decimal' },
+    { name: 'max_age_min', label: 'Не учитывать данные трекера старше, минут', value: s.max_age_min, inputmode: 'numeric' },
+  ], 'Сохранить', async (v) => { await api('/api/logist/stavtrack', 'POST', { ...v, enabled: v.enabled === '1' }); stCheck = null; });
+  const check = async () => {
+    try { stCheck = await api('/api/logist/stavtrack/check'); } catch (err) { stCheck = { error: err.message }; }
+    render();
+  };
+  const link = (v) => form('Устройство для ' + v.plate, [{ name: 'device_id', label: 'Устройство в Ставтрэке', value: '',
+    options: [{ value: '', label: 'Определять по госномеру' }].concat(stCheck.devices.map((d) => ({ value: d.id, label: d.name }))) }],
+  'Сохранить', async (x) => { await api('/api/logist/stavtrack/link', 'POST', { plate: v.plate, device_id: x.device_id ? Number(x.device_id) : null }); stCheck = await api('/api/logist/stavtrack/check'); });
+  return el('div', null,
+    el('div', { class: 'controls' },
+      el('button', { class: 'primary', id: 'st-setup', onclick: setup }, 'Подключение'),
+      el('button', { id: 'st-check', onclick: check }, 'Проверить связь и ДУТ'),
+      el('span', { id: 'st-state' }, s.enabled && s.password_set ? 'Топливо запрашивается при каждом взвешивании' : 'Выключено')),
+    el('p', { class: 'note' }, 'При взвешивании программа запрашивает у Ставтрэка уровень топлива по ДУТ. В сверке с весами топливо, сожжённое за рейс, вычитается из «отвезённого газа».'),
+    stCheck && stCheck.error ? el('div', { class: 'error', role: 'alert', id: 'st-error' }, stCheck.error) : null,
+    stCheck && stCheck.vehicles ? el('div', { class: 'scroll' }, el('table', { id: 'st-table' },
+      el('thead', null, el('tr', null, ['Машина', 'Устройство в Ставтрэке'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Топливо сейчас, л'), ['Замечание', ''].map((t) => el('th', null, t)))),
+      el('tbody', null, stCheck.vehicles.map((v) => el('tr', null, el('td', null, v.plate), el('td', null, v.device || el('span', { class: 'bad' }, 'не найдено')),
+        el('td', { class: 'num' }, v.liters === null ? '' : fmt(v.liters)),
+        el('td', null, v.note, v.note && v.sensors.length ? [el('br'), el('small', null, 'Датчики в данных: ' + v.sensors.join(', '))] : null),
+        el('td', null, el('button', { onclick: () => link(v) }, 'Выбрать устройство'))))))) : null);
 }
 
 // ----- сверка -----
@@ -377,9 +412,11 @@ async function renderLegs() {
     el('p', { class: 'note' }, `Поездка считается от взвешивания «уехал с базы» до следующего «приехал». Расхождением считается разница больше ${fmt(me.tolerance.tolerance_pct)} % и больше ${fmt(me.tolerance.tolerance_l)} л: литры по весам пересчитаны из килограммов по плотности.`),
     rows.length ? el('div', { class: 'scroll' }, el('table', { id: 'legs' },
       el('thead', null, el('tr', null, ['Выезд', 'Возврат', 'Машина', 'Водитель'].map((t) => el('th', null, t)),
-        ['При выезде, л', 'При возврате, л', 'По весам, л', 'По водителю, л', 'Разница, л'].map((t) => el('th', { class: 'num' }, t)), el('th', null, 'Итог'))),
+        ['При выезде, л', 'При возврате, л', 'Топливо, л', 'По весам, л', 'По водителю, л', 'Разница, л'].map((t) => el('th', { class: 'num' }, t)), el('th', null, 'Итог'))),
       el('tbody', null, rows.map((g) => el('tr', null, el('td', null, when(g.start)), el('td', null, when(g.end)), el('td', null, g.plate + (g.trailer ? ' + ' + g.trailer : '')), el('td', null, g.driver),
-        el('td', { class: 'num' }, fmt(g.out_l)), el('td', { class: 'num' }, fmt(g.in_l)), el('td', { class: 'num' }, fmt(g.scale_l)),
+        el('td', { class: 'num' }, fmt(g.out_l)), el('td', { class: 'num' }, fmt(g.in_l)),
+        el('td', { class: 'num', title: g.fuel_fix_l === null ? 'Нет показаний ДУТ на обоих взвешиваниях' : `ДУТ: ${fmt(g.fuel_out)} л при выезде, ${fmt(g.fuel_in)} л при возврате` }, g.fuel_fix_l === null ? '' : '−' + fmt(g.fuel_fix_l)),
+        el('td', { class: 'num' }, fmt(g.scale_l)),
         el('td', { class: 'num' }, fmt(g.driver_l) + ` (${g.unloads})`), el('td', { class: 'num' + (g.status === 'bad' ? ' bad' : '') }, fmt(g.diff_l)), el('td', null, status(g)))))))
       : el('p', { class: 'empty' }, 'За период нет выездов с базы с известной тарой машины.'));
 }

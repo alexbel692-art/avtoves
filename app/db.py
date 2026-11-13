@@ -143,6 +143,12 @@ class DB:
                           drv_name, (driver or {}).get("id"), comment, now_iso()))
         self.x("UPDATE weighings SET trip_id=? WHERE id=?", (tid, wid))
         self.recalc_gas(tid)
+        # Подписчики на взвешивание (например, запрос уровня топлива): их сбой не должен мешать весовой
+        for hook in getattr(self, "on_weighing", []):
+            try:
+                hook(wid, plate)
+            except Exception:  # noqa: BLE001
+                pass
         return {"weighing_id": wid, "trip": self.trip(tid)}
 
     # ---------------------------------------------------------- газ (газовозы)

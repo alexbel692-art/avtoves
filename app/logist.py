@@ -26,6 +26,7 @@ from starlette.routing import Route
 from . import __version__
 from . import settings as st
 from .plates import normalize as norm_plate
+from .stavtrack import Stavtrack, StError
 from .weighing import DriverError
 
 STATIC = Path(__file__).parent / "static"
@@ -283,6 +284,16 @@ def legs(db, density: float, tol_pct: float, tol_l: float, date_from: str | None
         sql += " AND plate=?"; args.append(plate)
     trips = db.q(sql + " ORDER BY plate, w2_ts", args)
     out = []
+    st = db.q("SELECT value FROM kv WHERE key='stavtrack'") if db.q(
+        "SELECT 1 FROM sqlite_master WHERE name='weigh_fuel'") else []
+    fuel_density = float(json.loads(st[0]["value"]).get("fuel_density", 0.84)) if st else 0.84
+
+    def fuel_at(weighing_id):
+        if weighing_id is None or not st:
+            return None
+        row = db.q("SELECT liters FROM weigh_fuel WHERE weighing_id=?", (weighing_id,))
+        return row[0]["liters"] if row else None
+
     for t in trips:
         if t.get("gas_out") is None:
             continue
@@ -303,7 +314,8 @@ def legs(db, density: float, tol_pct: float, tol_l: float, date_from: str | None
         leg = {"id": t["id"], "plate": t["plate"], "trailer": t.get("trailer") or "", "driver": t.get("driver") or "",
                "start": start, "end": end, "out_l": out_l, "in_l": None, "scale_l": None,
                "driver_l": by_driver, "unloads": len(rows), "diff_l": None, "diff_pct": None,
-               "status": "open", "left_l": round(out_l - by_driver)}
+               "status": "open", "left_l": round(out_l - by_driver),
+               "fuel_out": fuel_at(t.get("w2_id")), "fuel_in": None, "fuel_fix_l": None}
         if nxt:
             same = (nxt.get("trailer") or "") == leg["trailer"]
             if nxt.get("gas_in") is None or not same:
@@ -311,6 +323,12 @@ def legs(db, density: float, tol_pct: float, tol_l: float, date_from: str | None
             else:
                 leg["in_l"] = round(nxt["gas_in"] / density)
                 leg["scale_l"] = leg["out_l"] - leg["in_l"]
+                leg["fuel_in"] = fuel_at(nxt.get("w1_id"))
+                if leg["fuel_out"] is not None and leg["fuel_in"] is not None:
+                    # Сожжённое в рейсе топливо весы видят как «уехавший газ»: убираем его
+                    burned_kg = (leg["fuel_out"] - leg["fuel_in"]) * fuel_density
+                    leg["fuel_fix_l"] = round(burned_kg / density)
+                    leg["scale_l"] -= leg["fuel_fix_l"]
                 leg["diff_l"] = round(leg["scale_l"] - by_driver)
                 leg["diff_pct"] = round(leg["diff_l"] / leg["scale_l"] * 100, 1) if leg["scale_l"] > 0 else None
                 limit = max(tol_l, abs(leg["scale_l"]) * tol_pct / 100)
@@ -326,6 +344,10 @@ def build_routes(ctx, public: bool) -> list[Route]:
     tokens = Tokens(ctx.cfg["data_dir"])
     snap_dir = Path(ctx.cfg["data_dir"]) / "snapshots"
     pusher = getattr(ctx, "pusher", None) or Pusher(ctx.cfg["data_dir"])
+    if getattr(ctx, "stavtrack", None) is None:
+        ctx.stavtrack = Stavtrack(db)
+        db.on_weighing = getattr(db, "on_weighing", []) + [ctx.stavtrack.on_weighing]
+    stv = ctx.stavtrack
 
     def push(driver_id: int, title: str, body_: str):
         toks = [r["token"] for r in db.q("SELECT token FROM push_tokens WHERE driver_id=?", (driver_id,))]
@@ -773,7 +795,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
             sh.column_dimensions[col].width = w
         lg = wb.create_sheet("Сверка с весами")
         lg.append(["Выезд", "Возврат", "Машина", "Прицеп", "Водитель", "При выезде, л", "При возврате, л",
-                   "По весам, л", "По водителю, л", "Разница, л", "Разница, %", "Итог"])
+                   "По весам, л", "По водителю, л", "Разница, л", "Разница, %", "Итог", "Поправка на топливо, л"])
         for c in lg[1]:
             c.font = bold
         cfg_ = lcfg()
@@ -782,8 +804,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
                                           data["to"] + "T23:59:59"):
             lg.append([leg["start"].replace("T", " "), (leg["end"] or "").replace("T", " "), leg["plate"],
                        leg["trailer"], safe_cell(leg["driver"]), leg["out_l"], leg["in_l"], leg["scale_l"],
-                       leg["driver_l"], leg["diff_l"], leg["diff_pct"], names[leg["status"]]])
-        for col in "ABCDEFGHIJKL":
+                       leg["driver_l"], leg["diff_l"], leg["diff_pct"], names[leg["status"]], leg["fuel_fix_l"]])
+        for col in "ABCDEFGHIJKLM":
             lg.column_dimensions[col].width = 17
         buf = io.BytesIO()
         wb.save(buf)
@@ -1050,17 +1072,85 @@ def build_routes(ctx, public: bool) -> list[Route]:
             push(rows[0]["driver_id"], "Заказ отменён", f"{rows[0]['client']}: {rows[0]['liters']:g} л")
         return JSONResponse({"ok": True})
 
+    # ---- Ставтрэк: топливо по ДУТ
+    def admin_of(request: Request) -> dict:
+        u = logist_of(request)
+        if not u["admin"]:
+            raise Bad("Доступно только логисту-администратору", 403)
+        return u
+
+    @handler
+    async def stavtrack_api(request: Request):
+        admin_of(request)
+        if request.method == "POST":
+            b = await body(request)
+            new = {"enabled": bool(b.get("enabled")), "email": text(b.get("email"), "Логин", 200, False)}
+            url = text(b.get("url"), "Адрес API", 300)
+            if not re.match(r"^https?://[^\s/]+", url):
+                raise Bad("Адрес API: укажите полный адрес, например https://wiafleet.online/api")
+            new["url"] = url
+            if b.get("password"):
+                new["password"] = text(b["password"], "Пароль", 200)
+            for key, lo, hi in (("fuel_density", 0.6, 1.0), ("max_age_min", 1, 1440)):
+                try:
+                    val = float(str(b.get(key)).replace(",", "."))
+                except ValueError as exc:
+                    raise Bad("Укажите число") from exc
+                if not lo <= val <= hi:
+                    raise Bad(f"Значение должно быть от {lo} до {hi}")
+                new[key] = val
+            stv.save(new)
+        s_ = stv.settings()
+        return JSONResponse({k: v for k, v in s_.items() if k != "password"} | {"password_set": bool(s_["password"])})
+
+    @handler
+    async def stavtrack_check(request: Request):
+        """Проверка связи: какие машины привязаны и что сейчас показывает ДУТ."""
+        admin_of(request)
+        loop = asyncio.get_running_loop()
+
+        def work():
+            devs = stv.devices()
+            rows = []
+            for v in db.vehicles():
+                if v.get("kind") == "trailer":
+                    continue
+                f = stv.fuel(v["plate"])
+                rows.append({"plate": v["plate"], "device": f.get("device") or "", "liters": f["liters"],
+                             "age_s": f["age_s"], "note": f["note"],
+                             "sensors": sorted(str(k) for k in (f.get("raw") or {}))[:30],
+                             "linked": bool(db.q("SELECT 1 FROM st_links WHERE plate=?", (v["plate"],)))})
+            return {"devices": devs, "vehicles": rows}
+        try:
+            return JSONResponse(await loop.run_in_executor(None, work))
+        except StError as ex:
+            raise Bad(str(ex), 502) from ex
+
+    @handler
+    async def stavtrack_link(request: Request):
+        admin_of(request)
+        b = await body(request)
+        plate = text(b.get("plate"), "Машина", 20)
+        if b.get("device_id"):
+            db.x("INSERT INTO st_links(plate, device_id) VALUES(?,?) "
+                 "ON CONFLICT(plate) DO UPDATE SET device_id=excluded.device_id", (plate, int(b["device_id"])))
+        else:
+            db.x("DELETE FROM st_links WHERE plate=?", (plate,))
+        return JSONResponse({"ok": True})
+
     # ---- взвешивания с фото
     @handler
     async def weighings_api(request: Request):
         logist_of(request)
         start, end = period(request)
         tok = bearer(request)
-        rows = db.q("SELECT w.*, d.name AS driver FROM weighings w LEFT JOIN drivers d ON d.id=w.driver_id "
+        rows = db.q("SELECT w.*, d.name AS driver, f.liters AS fuel, f.note AS fuel_note FROM weighings w "
+                    "LEFT JOIN drivers d ON d.id=w.driver_id LEFT JOIN weigh_fuel f ON f.weighing_id=w.id "
                     "WHERE w.ts>=? AND w.ts<=? ORDER BY w.id DESC LIMIT 500", (start, end + "T23:59:59"))
         return JSONResponse([{
             "id": w["id"], "ts": w["ts"], "plate": w["plate"], "trailer": w.get("trailer") or "", "weight": w["weight"],
             "kind": w.get("kind") or "", "source": w.get("source") or "", "driver": w.get("driver") or "",
+            "fuel": w.get("fuel"), "fuel_note": w.get("fuel_note") or "",
             "photos": [f"/api/logist/photo/{x}?t={tok}" for x in (w["snapshots"] or "").split(";") if x],
         } for w in rows])
 
@@ -1131,6 +1221,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/orders/{oid:int}/cancel", order_cancel, methods=["POST"]),
         Route("/api/logist/orders/{oid:int}/seen", order_note_done, methods=["POST"]),
         Route("/api/logist/weighings", weighings_api),
+        Route("/api/logist/stavtrack", stavtrack_api, methods=["GET", "POST"]),
+        Route("/api/logist/stavtrack/check", stavtrack_check),
+        Route("/api/logist/stavtrack/link", stavtrack_link, methods=["POST"]),
         Route("/api/logist/photo/{path:path}", logist_photo),
         Route("/api/logist/invoices/{uid}/done", invoice_mark_as("done"), methods=["POST"]),
         Route("/api/logist/invoices/{uid}/undo", invoice_mark_as("undo"), methods=["POST"]),
