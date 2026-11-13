@@ -61,6 +61,20 @@ class FakeCtrl:
                 "ts": datetime.now().isoformat(timespec="seconds")}
 
 
+class FakePusher:
+    """Вместо Firebase: запоминает, что и кому отправлено."""
+
+    def __init__(self):
+        self.sent = []
+
+    def ready(self):
+        return True
+
+    def send(self, tokens, title, body):
+        self.sent.append((tuple(tokens), title, body))
+        return []
+
+
 class Ctx:
     sim = None
     cameras: list = []
@@ -74,6 +88,7 @@ class Ctx:
         self.db = DB(tmp_path / "t.db")
         self.scale = FakeScale()
         self.ctrl = FakeCtrl(self.db, self.scale)
+        self.pusher = FakePusher()
 
 
 def serve(app):
@@ -342,6 +357,24 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         page.reload()
         expect(page.locator("#state")).to_have_text("Все записи отправлены")
         assert len(ctx.db.q("SELECT 1 FROM unloads")) == 2
+
+        # Логист присылает заказ частному лицу: он появляется в приложении, водитель отмечает оплату
+        call(public, "/api/logist/clients", "POST", {"name": "Петров И. И.", "kind": "private", "address": "с. Южное, ул. Мира, 5"}, logist)
+        call(public, "/api/logist/orders", "POST", {"client_id": 4, "liters": 500, "driver_id": 1, "day": datetime.now().strftime("%Y-%m-%d")}, logist)
+        page.evaluate("window.dispatchEvent(new Event('online'))")
+        expect(page.locator("#orders")).to_contain_text("с. Южное, ул. Мира, 5")
+        expect(page.locator(".toast")).to_contain_text("Новый заказ")
+        page.screenshot(path=SHOTS / "orders.png", full_page=True)
+        page.click("#orders .order-done")
+        assert page.input_value("#liters") == "500"
+        page.click("#save-unload")
+        expect(page.locator("#unload-error")).to_contain_text("оплатил ли клиент")
+        page.click("#paid-no")
+        page.click("#save-unload")
+        page.click("#dialog-yes")       # больше остатка по весам: подтверждаем
+        expect(page.locator("#orders")).to_have_count(0)
+        expect(page.locator("#state")).to_have_text("Все записи отправлены")
+        assert ctx.db.q("SELECT paid FROM unloads WHERE order_id IS NOT NULL")[0]["paid"] == "no"
         assert errors == []
 
         # Кабинет логиста на внешнем порту
@@ -351,19 +384,30 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         desk.fill("#l-login", "olga")
         desk.fill("#l-pass", "parol-logista")
         desk.click("#l-enter")
-        expect(desk.locator("nav [data-tab=notices]")).to_have_text("Уведомления (2)")
+        expect(desk.locator("nav [data-tab=notices]")).to_have_text("Уведомления (3)")
+        expect(desk.locator("#unpaid")).to_contain_text("Петров И. И.")
         expect(desk.locator("#new-clients")).to_contain_text("ИП Смирнов")
         expect(desk.locator("#invoices tbody tr")).to_have_count(1)
         desk.screenshot(path=SHOTS / "notices.png")
         desk.click("#new-clients button:has-text('ИП Смирнов')")
-        desk.select_option("dialog select[name=legal]", "1")
-        desk.fill("dialog input[name=manager]", "Пётр")
+        desk.select_option("dialog select[name=kind]", "legal")
         desk.click("dialog button[type=submit]")
         expect(desk.locator("#invoices tbody tr")).to_have_count(2)
         desk.locator("#invoices tr:has-text('ООО «Север»') button").click()
         expect(desk.locator("#invoices tbody tr")).to_have_count(1)
+        desk.click("nav [data-tab=orders]")
+        expect(desk.locator("#orders")).to_contain_text("не оплачено")
+        desk.click("#add-order")
+        desk.select_option("dialog select[name=client_id]", label="АГЗС Север")
+        desk.fill("dialog input[name=liters]", "7000")
+        desk.select_option("dialog select[name=driver_id]", label="Петров Пётр")
+        desk.click("dialog button[type=submit]")
+        expect(desk.locator("#orders tbody tr")).to_have_count(2)
+        desk.screenshot(path=SHOTS / "orders-desk.png")
+        desk.click("nav [data-tab=weighings]")
+        expect(desk.locator("#weighings tbody tr")).to_have_count(2)
         desk.click("nav [data-tab=report]")
-        expect(desk.locator("#r-total")).to_have_text(f"25{nb}000,5")
+        expect(desk.locator("#r-total")).to_have_text(f"25{nb}500,5")
         with desk.expect_download() as dl:
             desk.click("#xlsx")
         assert dl.value.suggested_filename.endswith(".xlsx")
@@ -373,9 +417,118 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         desk.click("nav [data-tab=drivers]")
         expect(desk.locator("#drivers tbody tr")).to_have_count(2)
         desk.click("nav [data-tab=logists]")
-        expect(desk.locator("#logists")).to_contain_text("Администратор")
+        expect(desk.locator("#logists")).to_contain_text("Логист-администратор")
         small = browser.new_page(viewport={"width": 390, "height": 800})
         small.goto(public + "/logist")
         assert small.evaluate("document.documentElement.scrollWidth") <= 390
         assert errors == []
         browser.close()
+
+
+def wait_push(ctx, n):
+    for _ in range(100):
+        if len(ctx.pusher.sent) >= n:
+            return ctx.pusher.sent
+        time.sleep(0.02)
+    raise AssertionError(ctx.pusher.sent)
+
+
+def test_orders_payment_and_manager_cabinet(env):
+    ctx, local, public, logist = env
+    token = driver_token(public)
+    other = driver_token(public, "petrov")
+    day = datetime.now().strftime("%Y-%m-%d")
+    # Менеджеры и клиенты: частное лицо у Анны, юрлицо у Бориса
+    for name, login in (("Анна", "anna"), ("Борис", "boris")):
+        assert call(public, "/api/logist/logists", "POST", {"name": name, "login": login, "password": "parol-menedzhera", "role": "manager"}, logist)[0] == 200
+    managers = {m["login"]: m["id"] for m in call(public, "/api/logist/refs", token=logist)[1]["managers"]}
+    call(public, "/api/logist/clients", "POST", {"name": "Петров И. И.", "kind": "private", "address": "с. Южное, ул. Мира, 5", "manager_id": managers["anna"]}, logist)
+    call(public, "/api/logist/clients", "POST", {"id": 1, "name": "АГЗС Север", "kind": "legal", "legal_name": "ООО «Север»", "manager_id": managers["boris"]}, logist)
+    private_id = [c["id"] for c in call(public, "/api/logist/refs", token=logist)[1]["clients"] if c["name"] == "Петров И. И."][0]
+
+    # Заказ водителю: уведомление уходит на его телефон, адрес берётся у клиента
+    call(public, "/api/app/push-token", "POST", {"token": "phone-ivanov"}, token)
+    code, res = call(public, "/api/logist/orders", "POST", {"client_id": private_id, "liters": 500, "driver_id": 1, "day": day, "note": "Позвонить заранее"}, logist)
+    assert code == 200
+    order_id = res["id"]
+    call(public, "/api/logist/orders", "POST", {"client_id": 1, "liters": 12000, "driver_id": 1, "day": day}, logist)
+    sent = wait_push(ctx, 2)
+    assert sent[0] == (("phone-ivanov",), "Новый заказ", "Петров И. И.: 500 л. с. Южное, ул. Мира, 5")
+    me = call(public, "/api/app/me", token=token)[1]
+    assert [(o["client"], o["liters"], o["address"], bool(o["private"])) for o in me["orders"]] == [
+        ("Петров И. И.", 500.0, "с. Южное, ул. Мира, 5", True), ("АГЗС Север", 12000.0, "", False)]
+    assert call(public, "/api/app/me", token=other)[1]["orders"] == []
+
+    def sync(tok, op):
+        return call(public, "/api/app/sync", "POST", {"ops": [{"op_id": "x", **op}]}, tok)[1]["results"][0]
+
+    base = {"type": "unload", "plate": "Т100АА26", "trailer": "АВ123477", "liters": 480}
+    # Чужой заказ выполнить нельзя; у частного лица нужно отметить оплату
+    assert not sync(other, {**base, "id": "z1", "order_id": order_id, "paid": True})["ok"]
+    res = sync(token, {**base, "id": "p1", "order_id": order_id})
+    assert not res["ok"] and "оплатил" in res["error"]
+    assert sync(token, {**base, "id": "p1", "order_id": order_id, "paid": False})["ok"]
+    assert sync(token, {**base, "id": "p1", "order_id": order_id, "paid": False})["ok"]
+    # Второй заказ не получился
+    second = me["orders"][1]["id"]
+    assert sync(token, {"type": "order_fail", "order_id": second, "reason": "Закрыто"})["ok"]
+    assert call(public, "/api/app/me", token=token)[1]["orders"] == []
+    orders = call(public, f"/api/logist/orders?from={day}&to={day}", token=logist)[1]
+    assert [(o["status"], o["fact"], o["paid"], o["reason"]) for o in orders] == [("done", 480.0, "no", ""), ("failed", None, None, "Закрыто")]
+
+    # Логист видит неоплату и невыполненный заказ; заказ можно отправить заново, выполненный менять нельзя
+    notices = call(public, "/api/logist/notices", token=logist)[1]
+    assert [u["id"] for u in notices["unpaid"]] == ["p1"] and notices["unpaid"][0]["manager"] == "Анна"
+    assert [o["reason"] for o in notices["failed_orders"]] == ["Закрыто"]
+    assert call(public, "/api/logist/orders", "POST", {"id": order_id, "client_id": private_id, "liters": 1, "driver_id": 1, "day": day}, logist)[0] == 400
+    assert call(public, f"/api/logist/orders/{order_id}/cancel", "POST", token=logist)[0] == 400
+    assert call(public, "/api/logist/orders", "POST", {"id": second, "client_id": 1, "liters": 12000, "driver_id": 2, "day": day}, logist)[0] == 200
+    assert len(call(public, "/api/app/me", token=other)[1]["orders"]) == 1
+    assert call(public, f"/api/logist/orders/{second}/cancel", "POST", token=logist)[0] == 200
+    assert call(public, "/api/app/me", token=other)[1]["orders"] == []
+
+    # Кабинет менеджера: только свои клиенты, только оплаты и счета
+    anna = call(public, "/api/logist/login", "POST", {"login": "anna", "password": "parol-menedzhera"})[1]["token"]
+    boris = call(public, "/api/logist/login", "POST", {"login": "boris", "password": "parol-menedzhera"})[1]["token"]
+    sync(token, {**base, "id": "l1", "client_id": 1, "liters": 9000})
+    me_a = call(public, "/api/logist/me", token=anna)[1]
+    assert me_a["role"] == "manager" and me_a["notices"] == 1
+    n_a = call(public, "/api/logist/notices", token=anna)[1]
+    assert [u["id"] for u in n_a["unpaid"]] == ["p1"] and n_a["invoices"] == [] and n_a["legs"] == []
+    n_b = call(public, "/api/logist/notices", token=boris)[1]
+    assert n_b["unpaid"] == [] and [i["id"] for i in n_b["invoices"]] == ["l1"]
+    assert {u["id"] for u in call(public, "/api/logist/report", token=anna)[1]["unloads"]} == {"p1"}
+    assert [c["name"] for c in call(public, "/api/logist/refs", token=anna)[1]["clients"]] == ["Петров И. И."]
+    for path, method, body in (("/api/logist/orders", "GET", None), ("/api/logist/legs", "GET", None),
+                               ("/api/logist/weighings", "GET", None), ("/api/logist/unloads/p1", "DELETE", None),
+                               ("/api/logist/clients", "POST", {"name": "x"}), ("/api/logist/drivers", "POST", {"name": "x", "login": "x", "password": "12345678"}),
+                               ("/api/logist/logists", "POST", {"login": "hack", "password": "12345678"})):
+        assert call(public, path, method, body, anna)[0] == 403, path
+    assert len(call(public, "/api/logist/logists", token=anna)[1]) == 1
+    # Чужую оплату и чужой счёт отметить нельзя, свои можно
+    assert call(public, "/api/logist/unloads/p1/paid", "POST", token=boris)[0] == 403
+    assert call(public, "/api/logist/invoices/l1/done", "POST", token=anna)[0] == 403
+    assert call(public, "/api/logist/unloads/p1/paid", "POST", token=anna)[0] == 200
+    assert call(public, "/api/logist/unloads/p1/paid", "POST", token=anna)[0] == 409
+    assert call(public, "/api/logist/invoices/l1/done", "POST", token=boris)[0] == 200
+    assert call(public, "/api/logist/me", token=anna)[1]["notices"] == 0
+    row = ctx.db.q("SELECT paid, paid_by FROM unloads WHERE id='p1'")[0]
+    assert (row["paid"], row["paid_by"]) == ("yes", "Анна")
+
+
+def test_weighing_photos_in_cabinet(env):
+    ctx, local, public, logist = env
+    token = driver_token(public)
+    day = datetime.now().strftime("%Y-%m-%d")
+    folder = Path(ctx.cfg["data_dir"]) / "snapshots" / day
+    folder.mkdir()
+    for name in ("120000_cam1.jpg", "120000_cam2.jpg"):
+        (folder / name).write_bytes(b"\xff\xd8jpeg")
+    weigh(ctx, public, token, "arrival", 15000, datetime.now())
+    ctx.db.x("UPDATE weighings SET snapshots=?", (f"{day}/120000_cam1.jpg;{day}/120000_cam2.jpg",))
+    [w] = call(public, f"/api/logist/weighings?from={day}&to={day}", token=logist)[1]
+    assert w["kind"] == "arrival" and w["driver"] == "Иванов Сергей" and len(w["photos"]) == 2
+    code, data = call(public, w["photos"][1], raw=True)
+    assert code == 200 and data == b"\xff\xd8jpeg"
+    assert call(public, w["photos"][0].split("?")[0] + "?t=" + token)[0] == 401
+    assert call(public, f"/api/logist/photo/{day}/../../t.db?t={logist}")[0] in (400, 404)

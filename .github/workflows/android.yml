@@ -43,6 +43,16 @@ jobs:
             echo "apk=android/app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
             echo "name=AvtoVes-Voditel-PROBNAYA-apk" >> "$GITHUB_OUTPUT"
           fi
+      # Уведомления через Google: файл настроек проекта Firebase берётся из секрета
+      - name: Настройки Firebase
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+          else
+            echo "::warning::Нет секрета GOOGLE_SERVICES_JSON — приложение собрано без уведомлений через Google"
+          fi
       - name: Сборка
         working-directory: android
         env:

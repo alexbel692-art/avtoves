@@ -10,8 +10,11 @@ import asyncio
 import hashlib
 import hmac
 import io
+import json
+import logging
 import re
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -67,6 +70,24 @@ CREATE TABLE IF NOT EXISTS logists (
     admin     INTEGER NOT NULL DEFAULT 0,
     active    INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS orders (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    address   TEXT NOT NULL DEFAULT '',
+    liters    REAL NOT NULL,                  -- сколько нужно слить
+    driver_id INTEGER NOT NULL,
+    day       TEXT NOT NULL,
+    pos       INTEGER NOT NULL DEFAULT 0,
+    note      TEXT NOT NULL DEFAULT '',
+    status    TEXT NOT NULL DEFAULT 'new',    -- new / done / failed / cancelled
+    reason    TEXT NOT NULL DEFAULT '',
+    created   TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    closed    TEXT,
+    unload_id TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_orders_driver ON orders(driver_id, status);
+CREATE TABLE IF NOT EXISTS push_tokens (token TEXT PRIMARY KEY, driver_id INTEGER NOT NULL, updated TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notes_done (kind TEXT NOT NULL, ref TEXT NOT NULL, PRIMARY KEY(kind, ref));
 """
 
@@ -176,6 +197,61 @@ class Tokens:
         self.fails.pop(key, None)
 
 
+class Pusher:
+    """Уведомления водителям через Firebase. Работает, если в папке данных лежит firebase.json
+    (ключ сервисного аккаунта) и установлен пакет google-auth; иначе тихо выключен."""
+
+    def __init__(self, data_dir: str | Path):
+        self.file = Path(data_dir) / "firebase.json"
+        self.creds = None
+        self.project = None
+        self.log = logging.getLogger("push")
+
+    def ready(self) -> bool:
+        return self.file.is_file()
+
+    def _token(self) -> str:
+        from google.auth.transport.requests import Request as GRequest
+        from google.oauth2 import service_account
+        if self.creds is None:
+            self.creds = service_account.Credentials.from_service_account_file(
+                str(self.file), scopes=["https://www.googleapis.com/auth/firebase.messaging"])
+            self.project = self.creds.project_id
+        if not self.creds.valid:
+            self.creds.refresh(GRequest())
+        return self.creds.token
+
+    def send(self, tokens: list[str], title: str, body: str) -> list[str]:
+        """Отправляет уведомление; возвращает токены, которые больше не действуют."""
+        if not tokens or not self.ready():
+            return []
+        import urllib.error
+        import urllib.request
+        dead = []
+        try:
+            access = self._token()
+        except Exception as ex:  # noqa: BLE001
+            self.log.warning("Firebase не настроен или недоступен: %s", ex)
+            return []
+        for tok in tokens:
+            msg = {"message": {"token": tok, "notification": {"title": title, "body": body},
+                               "android": {"priority": "HIGH", "notification": {"sound": "default"}}}}
+            req = urllib.request.Request(
+                f"https://fcm.googleapis.com/v1/projects/{self.project}/messages:send",
+                data=json.dumps(msg).encode(), method="POST",
+                headers={"Authorization": "Bearer " + access, "Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(req, timeout=10).close()
+            except urllib.error.HTTPError as ex:
+                if ex.code in (400, 404):
+                    dead.append(tok)
+                else:
+                    self.log.warning("Firebase ответил ошибкой %s", ex.code)
+            except OSError as ex:
+                self.log.warning("Нет связи с Firebase: %s", ex)
+        return dead
+
+
 def init_db(db):
     with db.lock:
         db.conn.executescript(SCHEMA)
@@ -183,6 +259,16 @@ def init_db(db):
         for col in ("login", "pass_hash"):
             if col not in have:
                 db.conn.execute(f"ALTER TABLE drivers ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        for table, cols in (
+                ("clients", [("address", "TEXT NOT NULL DEFAULT ''"), ("private", "INTEGER NOT NULL DEFAULT 0"),
+                             ("manager_id", "INTEGER")]),
+                ("unloads", [("order_id", "INTEGER"), ("paid", "TEXT NOT NULL DEFAULT ''"), ("paid_at", "TEXT"),
+                             ("paid_by", "TEXT NOT NULL DEFAULT ''")]),
+                ("logists", [("role", "TEXT NOT NULL DEFAULT 'logist'")])):
+            have = {r[1] for r in db.conn.execute(f"PRAGMA table_info({table})")}
+            for col, ddl in cols:
+                if col not in have:
+                    db.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
         db.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_drivers_login ON drivers(login) WHERE login<>''")
         db.conn.commit()
 
@@ -239,6 +325,17 @@ def build_routes(ctx, public: bool) -> list[Route]:
     init_db(db)
     tokens = Tokens(ctx.cfg["data_dir"])
     snap_dir = Path(ctx.cfg["data_dir"]) / "snapshots"
+    pusher = getattr(ctx, "pusher", None) or Pusher(ctx.cfg["data_dir"])
+
+    def push(driver_id: int, title: str, body_: str):
+        toks = [r["token"] for r in db.q("SELECT token FROM push_tokens WHERE driver_id=?", (driver_id,))]
+        if not toks or not pusher.ready():
+            return
+
+        def work():
+            for dead in pusher.send(toks, title, body_):
+                db.x("DELETE FROM push_tokens WHERE token=?", (dead,))
+        threading.Thread(target=work, name="push", daemon=True).start()
 
     def lcfg() -> dict:
         c = ctx.cfg.get("logist") or {}
@@ -298,8 +395,18 @@ def build_routes(ctx, public: bool) -> list[Route]:
     def driver_of(request: Request, token: str | None = None) -> dict:
         return current(request, "d", "drivers", token)
 
+    def staff(request: Request, token: str | None = None) -> dict:
+        """Логист или менеджер. Менеджер видит только своих клиентов: оплаты и счета."""
+        return current(request, "l", "logists", token)
+
     def logist_of(request: Request) -> dict:
-        return current(request, "l", "logists")
+        u = staff(request)
+        if u["role"] != "logist":
+            raise Bad("Доступно только логисту", 403)
+        return u
+
+    def own(u: dict) -> int | None:
+        return u["id"] if u["role"] == "manager" else None
 
     # ------------------------------------------------------------ приложение водителя
     @handler
@@ -318,7 +425,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
     def unload_json(r: dict) -> dict:
         return {"id": r["id"], "client_id": r["client_id"], "client": r["client"], "liters": r["liters"],
                 "ts": r["ts"], "plate": r["plate"], "trailer": r["trailer"], "comment": r["comment"],
-                "driver": r["driver"], "driver_id": r["driver_id"], "invoice": r["invoice"]}
+                "driver": r["driver"], "driver_id": r["driver_id"], "invoice": r["invoice"],
+                "paid": r.get("paid") or "", "order_id": r.get("order_id")}
 
     def combo_of(driver: dict) -> tuple[str, str]:
         last = db.q("SELECT plate, trailer FROM weighings WHERE driver_id=? ORDER BY id DESC LIMIT 1", (driver["id"],))
@@ -359,7 +467,11 @@ def build_routes(ctx, public: bool) -> list[Route]:
             "plate": plate, "trailer": trailer,
             "scale": {"connected": sc["connected"], "weight": sc["weight"], "stable": sc["stable"]},
             "state_text": c["state_text"], "warning": c["warning"],
-            "clients": db.q("SELECT id, name FROM clients WHERE active=1 ORDER BY name"),
+            "clients": db.q("SELECT id, name, private FROM clients WHERE active=1 ORDER BY name"),
+            "orders": db.q("SELECT o.id, o.client_id, c.name AS client, c.private, o.address, o.liters, o.day, o.note "
+                           "FROM orders o JOIN clients c ON c.id=o.client_id "
+                           "WHERE o.driver_id=? AND o.status='new' ORDER BY o.day, o.pos, o.id", (d["id"],)),
+            "push": pusher.ready(),
             "unloads": [unload_json(r) for r in mine],
             "road": road_info(plate),
             "weighings": [{"id": w["id"], "ts": w["ts"], "plate": w["plate"], "trailer": w.get("trailer", ""),
@@ -447,10 +559,41 @@ def build_routes(ctx, public: bool) -> list[Route]:
         amount = liters_value(op.get("liters"))
         ts = local_ts(op.get("at"))
         comment = text(op.get("comment"), "Комментарий", 200, required=False)
-        cid = client_id_for(op)
-        db.x("INSERT INTO unloads(id,driver_id,driver,plate,trailer,client_id,liters,ts,comment,created) "
-             "VALUES(?,?,?,?,?,?,?,?,?,?)", (uid, d["id"], d["name"], plate, trailer, cid, amount, ts, comment, now_iso()))
+        order = None
+        if op.get("order_id") is not None:
+            found = db.q("SELECT * FROM orders WHERE id=?", (op["order_id"],))
+            if not found or found[0]["driver_id"] != d["id"]:
+                raise Bad("Заказ не найден")
+            order = found[0]
+            if order["status"] == "cancelled":
+                raise Bad("Заказ отменён логистом")
+            if order["status"] == "done":
+                raise Bad("Заказ уже выполнен")
+        cid = order["client_id"] if order else client_id_for(op)
+        client = db.q("SELECT * FROM clients WHERE id=?", (cid,))[0]
+        paid = ""
+        if isinstance(op.get("paid"), bool):
+            paid = "yes" if op["paid"] else "no"
+        if client["private"] and not paid:
+            raise Bad("Укажите, оплатил ли клиент")
+        if client["legal"] or (client["reviewed"] and not client["private"]):
+            paid = ""          # юрлицу выставляют счёт, на своих объектах оплаты нет
+        db.x("INSERT INTO unloads(id,driver_id,driver,plate,trailer,client_id,liters,ts,comment,created,order_id,paid) "
+             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+             (uid, d["id"], d["name"], plate, trailer, cid, amount, ts, comment, now_iso(),
+              order["id"] if order else None, paid))
+        if order:
+            db.x("UPDATE orders SET status='done', closed=?, unload_id=?, reason='' WHERE id=?", (ts, uid, order["id"]))
         refresh_invoice(uid)
+
+    def apply_order_fail(d: dict, op: dict):
+        found = db.q("SELECT * FROM orders WHERE id=?", (op.get("order_id"),))
+        if not found or found[0]["driver_id"] != d["id"]:
+            raise Bad("Заказ не найден")
+        if found[0]["status"] != "new":
+            return
+        db.x("UPDATE orders SET status='failed', reason=?, closed=? WHERE id=?",
+             (text(op.get("reason"), "Причина", 200), local_ts(op.get("at")), found[0]["id"]))
 
     def apply_delete(d: dict, op: dict):
         rows = db.q("SELECT * FROM unloads WHERE id=?", (str(op.get("unload_id")),))
@@ -464,7 +607,19 @@ def build_routes(ctx, public: bool) -> list[Route]:
         if r["invoice"] == "done":
             raise Bad("По выгрузке уже выставлен счёт: обратитесь к логисту")
         db.x("UPDATE unloads SET deleted=? WHERE id=?", (now_iso(), r["id"]))
+        if r.get("order_id"):
+            db.x("UPDATE orders SET status='new', closed=NULL, unload_id=NULL WHERE id=? AND status='done'",
+                 (r["order_id"],))
         refresh_invoice(r["id"])
+
+    @handler
+    async def app_push_token(request: Request):
+        d = driver_of(request)
+        tok = text((await body(request)).get("token"), "Токен", 4096)
+        db.x("INSERT INTO push_tokens(token, driver_id, updated) VALUES(?,?,?) "
+             "ON CONFLICT(token) DO UPDATE SET driver_id=excluded.driver_id, updated=excluded.updated",
+             (tok, d["id"], now_iso()))
+        return JSONResponse({"ok": True})
 
     @handler
     async def app_sync(request: Request):
@@ -476,9 +631,10 @@ def build_routes(ctx, public: bool) -> list[Route]:
         for op in ops:
             key = op.get("op_id") if isinstance(op, dict) else None
             try:
-                if not isinstance(op, dict) or op.get("type") not in ("unload", "delete"):
+                kinds = {"unload": apply_unload, "delete": apply_delete, "order_fail": apply_order_fail}
+                if not isinstance(op, dict) or op.get("type") not in kinds:
                     raise Bad("Неизвестный тип записи")
-                (apply_unload if op["type"] == "unload" else apply_delete)(d, op)
+                kinds[op["type"]](d, op)
                 results.append({"op_id": key, "ok": True})
             except Bad as ex:
                 results.append({"op_id": key, "ok": False, "error": ex.message})
@@ -517,9 +673,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def logist_me(request: Request):
-        u = logist_of(request)
-        return JSONResponse({"login": u["login"], "name": u["name"], "admin": bool(u["admin"]),
-                             "notices": notice_count(), "tolerance": lcfg()})
+        u = staff(request)
+        return JSONResponse({"login": u["login"], "name": u["name"], "admin": bool(u["admin"]), "role": u["role"],
+                             "notices": notice_count(own(u)), "tolerance": lcfg(), "push": pusher.ready()})
 
     def period(request: Request) -> tuple[str, str]:
         q = request.query_params
@@ -532,11 +688,13 @@ def build_routes(ctx, public: bool) -> list[Route]:
             raise Bad("Начало периода позже конца")
         return start, end
 
-    def report(request: Request) -> dict:
+    def report(request: Request, owner: int | None = None) -> dict:
         start, end = period(request)
         sql = ("SELECT u.*, c.name AS client FROM unloads u JOIN clients c ON c.id=u.client_id "
                "WHERE u.deleted IS NULL AND u.ts>=? AND u.ts<=?")
         args: list = [start, end + "T23:59:59"]
+        if owner is not None:
+            sql += " AND c.manager_id=?"; args.append(owner)
         q = request.query_params
         for name, col in (("driver_id", "u.driver_id"), ("client_id", "u.client_id")):
             if q.get(name):
@@ -561,14 +719,20 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def logist_report(request: Request):
-        logist_of(request)
-        return JSONResponse(report(request))
+        return JSONResponse(report(request, own(staff(request))))
 
     @handler
     async def logist_refs(request: Request):
-        logist_of(request)
+        u = staff(request)
         vs = db.vehicles()
+        managers = db.q("SELECT id, name, login FROM logists WHERE role='manager' AND active=1 ORDER BY name")
+        if u["role"] == "manager":
+            return JSONResponse({
+                "drivers": db.q("SELECT id, name FROM drivers ORDER BY name"),
+                "clients": db.q("SELECT * FROM clients WHERE manager_id=? ORDER BY name", (u["id"],)),
+                "vehicles": [{"plate": v["plate"]} for v in vs], "managers": []})
         return JSONResponse({
+            "managers": managers,
             "drivers": db.q("SELECT id,name,login,active,plate,(pass_hash<>'') AS has_password FROM drivers ORDER BY name"),
             "clients": db.q("SELECT * FROM clients ORDER BY active DESC, name"),
             "vehicles": [{"plate": v["plate"], "kind": v.get("kind") or "", "tank_l": v.get("tank_l"),
@@ -577,10 +741,10 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def logist_xlsx(request: Request):
-        logist_of(request)
+        owner = own(staff(request))
         from openpyxl import Workbook
         from openpyxl.styles import Font
-        data = report(request)
+        data = report(request, owner)
         wb = Workbook()
         ws = wb.active
         ws.title = "Итого"
@@ -598,14 +762,14 @@ def build_routes(ctx, public: bool) -> list[Route]:
                 ws.append([safe_cell(item["name"]), item["liters"], item["count"]])
         ws.column_dimensions["A"].width = 34
         sh = wb.create_sheet("Выгрузки")
-        sh.append(["Дата и время", "Водитель", "Машина", "Прицеп", "Клиент", "Литры", "Счёт", "Комментарий"])
+        sh.append(["Дата и время", "Водитель", "Машина", "Прицеп", "Клиент", "Литры", "Счёт", "Комментарий", "Оплата"])
         for c in sh[1]:
             c.font = bold
         for u in data["unloads"]:
             sh.append([u["ts"].replace("T", " "), safe_cell(u["driver"]), u["plate"], u["trailer"], safe_cell(u["client"]),
                        u["liters"], {"pending": "нужно выставить", "done": "выставлен"}.get(u["invoice"], ""),
-                       safe_cell(u["comment"])])
-        for col, w in zip("ABCDEFGH", (20, 26, 14, 14, 30, 12, 18, 40)):
+                       safe_cell(u["comment"]), {"yes": "оплачено", "no": "не оплачено"}.get(u["paid"], "")])
+        for col, w in zip("ABCDEFGHI", (20, 26, 14, 14, 30, 12, 18, 40, 14)):
             sh.column_dimensions[col].width = w
         lg = wb.create_sheet("Сверка с весами")
         lg.append(["Выезд", "Возврат", "Машина", "Прицеп", "Водитель", "При выезде, л", "При возврате, л",
@@ -614,8 +778,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
             c.font = bold
         cfg_ = lcfg()
         names = {"ok": "сходится", "bad": "расхождение", "open": "в рейсе", "unknown": "нельзя сравнить"}
-        for leg in legs(db, density(), cfg_["tolerance_pct"], cfg_["tolerance_l"], data["from"],
-                        data["to"] + "T23:59:59"):
+        for leg in [] if owner else legs(db, density(), cfg_["tolerance_pct"], cfg_["tolerance_l"], data["from"],
+                                          data["to"] + "T23:59:59"):
             lg.append([leg["start"].replace("T", " "), (leg["end"] or "").replace("T", " "), leg["plate"],
                        leg["trailer"], safe_cell(leg["driver"]), leg["out_l"], leg["in_l"], leg["scale_l"],
                        leg["driver_l"], leg["diff_l"], leg["diff_pct"], names[leg["status"]]])
@@ -660,9 +824,17 @@ def build_routes(ctx, public: bool) -> list[Route]:
     async def client_save(request: Request):
         logist_of(request)
         b = await body(request)
-        f = {"name": text(b.get("name"), "Название", 120), "legal": int(bool(b.get("legal"))),
+        kind = b.get("kind") or ("legal" if b.get("legal") else "private" if b.get("private") else "own")
+        if kind not in ("legal", "private", "own"):
+            raise Bad("Некорректный тип клиента")
+        manager_id = b.get("manager_id") or None
+        if manager_id is not None and not db.q("SELECT 1 FROM logists WHERE id=? AND role='manager'", (manager_id,)):
+            raise Bad("Менеджер не найден")
+        f = {"name": text(b.get("name"), "Название", 120), "legal": int(kind == "legal"),
              "legal_name": text(b.get("legal_name"), "Юрлицо", 200, False),
-             "manager": text(b.get("manager"), "Менеджер", 120, False), "active": int(b.get("active", True) is not False)}
+             "manager": text(b.get("manager"), "Менеджер", 120, False), "active": int(b.get("active", True) is not False),
+             "address": text(b.get("address"), "Адрес", 300, False), "private": int(kind == "private"),
+             "manager_id": manager_id}
         other = [r for r in db.q("SELECT id, name FROM clients") if r["name"].casefold() == f["name"].casefold()]
         cid = b.get("id")
         if other and other[0]["id"] != cid:
@@ -671,7 +843,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
             old = db.q("SELECT * FROM clients WHERE id=?", (cid,))
             if not old:
                 raise Bad("Клиент не найден", 404)
-            db.x("UPDATE clients SET name=?,legal=?,legal_name=?,manager=?,active=?,reviewed=1 WHERE id=?",
+            db.x("UPDATE clients SET name=?,legal=?,legal_name=?,manager=?,active=?,address=?,private=?,manager_id=?,"
+                 "reviewed=1 WHERE id=?",
                  (*f.values(), cid))
             # Клиента добавил водитель: счёт нужен и по выгрузкам, записанным до проверки.
             if f["legal"] and not old[0]["reviewed"]:
@@ -681,7 +854,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
             for r in stale:
                 refresh_invoice(r["id"])
         else:
-            cid = db.x("INSERT INTO clients(name,legal,legal_name,manager,active) VALUES(?,?,?,?,?)", tuple(f.values()))
+            cid = db.x("INSERT INTO clients(name,legal,legal_name,manager,active,address,private,manager_id) "
+                       "VALUES(?,?,?,?,?,?,?,?)", tuple(f.values()))
         return JSONResponse({"ok": True, "id": cid})
 
     # ---- водители: логин и пароль для приложения
@@ -711,9 +885,11 @@ def build_routes(ctx, public: bool) -> list[Route]:
     # ---- логисты
     @handler
     async def logists_api(request: Request):
-        u = logist_of(request)
+        u = staff(request)
         if request.method == "GET":
-            return JSONResponse(db.q("SELECT id,login,name,admin,active FROM logists ORDER BY login"))
+            if u["role"] == "manager":
+                return JSONResponse(db.q("SELECT id,login,name,admin,active,role FROM logists WHERE id=?", (u["id"],)))
+            return JSONResponse(db.q("SELECT id,login,name,admin,active,role FROM logists ORDER BY role, login"))
         b = await body(request)
         lid = b.get("id")
         if not u["admin"] and lid != u["id"]:
@@ -735,8 +911,10 @@ def build_routes(ctx, public: bool) -> list[Route]:
         login = text(b.get("login"), "Логин", 60).casefold()
         if db.q("SELECT 1 FROM logists WHERE login=?", (login,)):
             raise Bad("Такой логин уже есть", 409)
-        db.x("INSERT INTO logists(login,name,pass_hash,admin) VALUES(?,?,?,?)",
-             (login, text(b.get("name"), "Имя", 120, False), new_password(b.get("password")), int(bool(b.get("admin")))))
+        role = "manager" if b.get("role") == "manager" else "logist"
+        db.x("INSERT INTO logists(login,name,pass_hash,admin,role) VALUES(?,?,?,?,?)",
+             (login, text(b.get("name"), "Имя", 120, False), new_password(b.get("password")),
+              int(bool(b.get("admin")) and role == "logist"), role))
         return JSONResponse({"ok": True})
 
     # ---- уведомления
@@ -747,27 +925,154 @@ def build_routes(ctx, public: bool) -> list[Route]:
         return [leg for leg in legs(db, density(), c["tolerance_pct"], c["tolerance_l"], since)
                 if leg["status"] == "bad" and str(leg["id"]) not in done]
 
-    def notice_count() -> int:
-        n = db.q("SELECT COUNT(*) AS n FROM unloads WHERE invoice='pending' AND deleted IS NULL")[0]["n"]
+    def failed_orders() -> list[dict]:
+        since = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+        return db.q("SELECT o.id, o.day, o.liters, o.address, o.reason, c.name AS client, d.name AS driver "
+                    "FROM orders o JOIN clients c ON c.id=o.client_id JOIN drivers d ON d.id=o.driver_id "
+                    "WHERE o.status='failed' AND o.day>=? AND CAST(o.id AS TEXT) NOT IN "
+                    "(SELECT ref FROM notes_done WHERE kind='order') ORDER BY o.closed DESC", (since,))
+
+    def notice_count(owner: int | None = None) -> int:
+        mine, args = ("", ()) if owner is None else (" AND c.manager_id=?", (owner,))
+        n = db.q("SELECT COUNT(*) AS n FROM unloads u JOIN clients c ON c.id=u.client_id WHERE u.deleted IS NULL "
+                 "AND (u.invoice='pending' OR u.paid='no')" + mine, args)[0]["n"]
+        if owner is not None:
+            return n
         n += db.q("SELECT COUNT(*) AS n FROM clients WHERE reviewed=0 AND active=1")[0]["n"]
-        return n + len(bad_legs())
+        return n + len(bad_legs()) + len(failed_orders())
 
     @handler
     async def notices(request: Request):
-        logist_of(request)
+        u = staff(request)
+        owner = own(u)
+        mine, margs = ("", ()) if owner is None else (" AND c.manager_id=?", (owner,))
         status = "done" if request.query_params.get("invoices") == "done" else "pending"
         order = "u.invoiced_at DESC" if status == "done" else "u.ts"
-        inv = db.q("SELECT u.*, c.name AS client, c.legal_name, c.manager FROM unloads u "
-                   "JOIN clients c ON c.id=u.client_id WHERE u.invoice=? AND u.deleted IS NULL "
-                   f"ORDER BY {order} LIMIT 500", (status,))
+        base = ("SELECT u.*, c.name AS client, c.legal_name, COALESCE(NULLIF(m.name,''), m.login, c.manager) AS manager "
+                "FROM unloads u JOIN clients c ON c.id=u.client_id LEFT JOIN logists m ON m.id=c.manager_id "
+                "WHERE u.deleted IS NULL")
+        inv = db.q(f"{base} AND u.invoice=?{mine} ORDER BY {order} LIMIT 500", (status, *margs))
+        unpaid = db.q(f"{base} AND u.paid='no'{mine} ORDER BY u.ts LIMIT 500", margs)
+
+        def row(r):
+            return {"id": r["id"], "ts": r["ts"], "client": r["legal_name"] or r["client"], "point": r["client"],
+                    "manager": r["manager"] or "", "liters": r["liters"], "driver": r["driver"], "plate": r["plate"],
+                    "invoiced_at": r["invoiced_at"], "invoiced_by": r["invoiced_by"]}
         return JSONResponse({
-            "invoices": [{"id": r["id"], "ts": r["ts"], "client": r["legal_name"] or r["client"], "point": r["client"],
-                          "manager": r["manager"], "liters": r["liters"], "driver": r["driver"], "plate": r["plate"],
-                          "invoiced_at": r["invoiced_at"], "invoiced_by": r["invoiced_by"]} for r in inv],
-            "legs": bad_legs(),
-            "new_clients": db.q("SELECT id, name FROM clients WHERE reviewed=0 AND active=1 ORDER BY name"),
-            "count": notice_count(),
+            "invoices": [row(r) for r in inv],
+            "unpaid": [row(r) for r in unpaid],
+            "legs": [] if owner else bad_legs(),
+            "failed_orders": [] if owner else failed_orders(),
+            "new_clients": [] if owner else db.q("SELECT id, name FROM clients WHERE reviewed=0 AND active=1 ORDER BY name"),
+            "count": notice_count(owner),
         })
+
+    def manager_owns(u: dict, uid: str):
+        if u["role"] == "manager" and not db.q(
+                "SELECT 1 FROM unloads u JOIN clients c ON c.id=u.client_id WHERE u.id=? AND c.manager_id=?",
+                (uid, u["id"])):
+            raise Bad("Это клиент другого менеджера", 403)
+
+    @handler
+    async def paid_mark(request: Request):
+        u = staff(request)
+        uid = request.path_params["uid"]
+        manager_owns(u, uid)
+        with db.lock:
+            changed = db.conn.execute(
+                "UPDATE unloads SET paid='yes', paid_at=?, paid_by=? WHERE id=? AND paid='no' AND deleted IS NULL",
+                (now_iso(), u["name"] or u["login"], uid)).rowcount
+            db.conn.commit()
+        if not changed:
+            raise Bad("Оплата уже отмечена", 409)
+        return JSONResponse({"ok": True})
+
+    @handler
+    async def order_note_done(request: Request):
+        logist_of(request)
+        db.x("INSERT OR IGNORE INTO notes_done(kind, ref) VALUES('order', ?)", (str(int(request.path_params["oid"])),))
+        return JSONResponse({"ok": True})
+
+    # ---- заказы водителям
+    @handler
+    async def orders_api(request: Request):
+        u = logist_of(request)
+        if request.method == "GET":
+            start, end = period(request)
+            return JSONResponse(db.q(
+                "SELECT o.*, c.name AS client, d.name AS driver, un.liters AS fact, un.paid FROM orders o "
+                "JOIN clients c ON c.id=o.client_id JOIN drivers d ON d.id=o.driver_id "
+                "LEFT JOIN unloads un ON un.id=o.unload_id WHERE o.day BETWEEN ? AND ? "
+                "ORDER BY o.day, d.name, o.pos, o.id", (start, end)))
+        b = await body(request)
+        client = db.q("SELECT * FROM clients WHERE id=?", (b.get("client_id"),))
+        driver = db.q("SELECT * FROM drivers WHERE id=? AND active=1", (b.get("driver_id"),))
+        if not client:
+            raise Bad("Выберите клиента")
+        if not driver:
+            raise Bad("Выберите водителя")
+        day = str(b.get("day") or "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            raise Bad("Укажите дату")
+        f = (client[0]["id"], text(b.get("address"), "Адрес", 300, False) or client[0]["address"],
+             liters_value(b.get("liters")), driver[0]["id"], day, text(b.get("note"), "Примечание", 300, False))
+        oid = b.get("id")
+        if oid:
+            old = db.q("SELECT * FROM orders WHERE id=?", (oid,))
+            if not old:
+                raise Bad("Заказ не найден", 404)
+            if old[0]["status"] == "done":
+                raise Bad("Заказ уже выполнен")
+            db.x("UPDATE orders SET client_id=?,address=?,liters=?,driver_id=?,day=?,note=?,status='new',reason='',"
+                 "closed=NULL WHERE id=?", (*f, oid))
+            if old[0]["driver_id"] != f[3] and old[0]["status"] == "new":
+                push(old[0]["driver_id"], "Заказ снят", f"{client[0]['name']}: заказ передан другому водителю")
+            push(f[3], "Заказ изменён" if old[0]["driver_id"] == f[3] else "Новый заказ",
+                 f"{client[0]['name']}: {f[2]:g} л. {f[1]}".strip())
+        else:
+            pos = db.q("SELECT COALESCE(MAX(pos),0)+1 AS p FROM orders WHERE driver_id=? AND day=?", (f[3], day))[0]["p"]
+            oid = db.x("INSERT INTO orders(client_id,address,liters,driver_id,day,note,pos,created,created_by) "
+                       "VALUES(?,?,?,?,?,?,?,?,?)", (*f, pos, now_iso(), u["login"]))
+            push(f[3], "Новый заказ", f"{client[0]['name']}: {f[2]:g} л. {f[1]}".strip())
+        return JSONResponse({"ok": True, "id": oid})
+
+    @handler
+    async def order_cancel(request: Request):
+        logist_of(request)
+        rows = db.q("SELECT o.*, c.name AS client FROM orders o JOIN clients c ON c.id=o.client_id WHERE o.id=?",
+                    (request.path_params["oid"],))
+        if not rows:
+            raise Bad("Заказ не найден", 404)
+        if rows[0]["status"] == "done":
+            raise Bad("Заказ уже выполнен")
+        db.x("UPDATE orders SET status='cancelled', closed=? WHERE id=?", (now_iso(), rows[0]["id"]))
+        if rows[0]["status"] == "new":
+            push(rows[0]["driver_id"], "Заказ отменён", f"{rows[0]['client']}: {rows[0]['liters']:g} л")
+        return JSONResponse({"ok": True})
+
+    # ---- взвешивания с фото
+    @handler
+    async def weighings_api(request: Request):
+        logist_of(request)
+        start, end = period(request)
+        tok = bearer(request)
+        rows = db.q("SELECT w.*, d.name AS driver FROM weighings w LEFT JOIN drivers d ON d.id=w.driver_id "
+                    "WHERE w.ts>=? AND w.ts<=? ORDER BY w.id DESC LIMIT 500", (start, end + "T23:59:59"))
+        return JSONResponse([{
+            "id": w["id"], "ts": w["ts"], "plate": w["plate"], "trailer": w.get("trailer") or "", "weight": w["weight"],
+            "kind": w.get("kind") or "", "source": w.get("source") or "", "driver": w.get("driver") or "",
+            "photos": [f"/api/logist/photo/{x}?t={tok}" for x in (w["snapshots"] or "").split(";") if x],
+        } for w in rows])
+
+    @handler
+    async def logist_photo(request: Request):
+        u = staff(request, request.query_params.get("t", ""))
+        if u["role"] != "logist":
+            raise Bad("Доступно только логисту", 403)
+        rel = request.path_params["path"]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}/[\w.\-]+\.jpg", rel) or not (snap_dir / rel).is_file():
+            raise Bad("Не найдено", 404)
+        return FileResponse(snap_dir / rel)
 
     def invoice_mark_as(action: str):
         @handler
@@ -776,8 +1081,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
         return mark
 
     async def invoice_mark(request: Request, action: str):
-        u = logist_of(request)
+        u = staff(request)
         uid = request.path_params["uid"]
+        manager_owns(u, uid)
         if action == "done":
             sql = ("UPDATE unloads SET invoice='done', invoiced_at=?, invoiced_by=? "
                    "WHERE id=? AND invoice='pending' AND deleted IS NULL")
@@ -804,6 +1110,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/app/me", app_me),
         Route("/api/app/weigh", app_weigh, methods=["POST"]),
         Route("/api/app/sync", app_sync, methods=["POST"]),
+        Route("/api/app/push-token", app_push_token, methods=["POST"]),
         Route("/api/app/photo/{path:path}", app_photo),
         Route("/logist", logist_page),
         Route("/api/logist/status", logist_status),
@@ -819,6 +1126,12 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/drivers", driver_save, methods=["POST"]),
         Route("/api/logist/logists", logists_api, methods=["GET", "POST"]),
         Route("/api/logist/notices", notices),
+        Route("/api/logist/unloads/{uid}/paid", paid_mark, methods=["POST"]),
+        Route("/api/logist/orders", orders_api, methods=["GET", "POST"]),
+        Route("/api/logist/orders/{oid:int}/cancel", order_cancel, methods=["POST"]),
+        Route("/api/logist/orders/{oid:int}/seen", order_note_done, methods=["POST"]),
+        Route("/api/logist/weighings", weighings_api),
+        Route("/api/logist/photo/{path:path}", logist_photo),
         Route("/api/logist/invoices/{uid}/done", invoice_mark_as("done"), methods=["POST"]),
         Route("/api/logist/invoices/{uid}/undo", invoice_mark_as("undo"), methods=["POST"]),
         Route("/api/logist/legs/{tid:int}/done", leg_done, methods=["POST"]),

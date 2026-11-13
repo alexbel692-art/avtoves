@@ -12,3 +12,5 @@ android/local.properties
 *.jks
 tests/shots/
 .pytest_cache/
+android/app/google-services.json
+firebase.json

@@ -28,9 +28,10 @@ let notice = '';
 let weighResult = null;
 let weighBusy = false;
 let pollTimer = null;
+let orderForUnload = null;
 
 function emptyData() {
-  return { queue: [], rejected: [], me: null, plate: '', trailer: '', picked: false };
+  return { queue: [], rejected: [], me: null, plate: '', trailer: '', picked: false, seenOrders: [] };
 }
 function dataKey() { return 'av.d.' + session.driver.id; }
 function saveData() { save(dataKey(), data); }
@@ -80,7 +81,29 @@ function ask(text, yes, onYes) {
         el('button', { class: 'quiet', onclick: close }, 'Отмена'),
         el('button', { class: 'main', id: 'dialog-yes', onclick: () => { close(); onYes(); } }, yes)))));
 }
-const me = () => data.me || { plates: [], trailers: [], kinds: {}, tanks: {}, clients: [], unloads: [], weighings: [], scale: {}, road: null };
+const me = () => data.me || { plates: [], trailers: [], kinds: {}, tanks: {}, clients: [], unloads: [], weighings: [], scale: {}, road: null, orders: [] };
+// Мост в Android: системные уведомления и адрес устройства для уведомлений через Google
+const native = window.Android || null;
+function activeOrders() {
+  const closed = new Set(data.queue.filter((op) => op.order_id).map((op) => op.order_id));
+  return (me().orders || []).filter((o) => !closed.has(o.id));
+}
+function announceOrders() {
+  const seen = new Set(data.seenOrders || []);
+  const fresh = (me().orders || []).filter((o) => !seen.has(o.id));
+  data.seenOrders = (me().orders || []).map((o) => o.id);
+  if (!fresh.length) return;
+  const text = fresh.length === 1 ? `${fresh[0].client}: ${fmt(fresh[0].liters)} л. ${fresh[0].address}` : `Новых заказов: ${fresh.length}`;
+  toast('Новый заказ. ' + text);
+  try { if (native && document.hidden) native.notify('Новый заказ', text); } catch (e) { /* нет моста */ }
+}
+window.avtovesPushToken = function (token) {
+  if (!session || !token) return;
+  authed('/api/app/push-token', { method: 'POST', body: { token } }).catch(() => {});
+};
+function askPush() {
+  try { if (native) native.requestPush(); } catch (e) { /* нет моста */ }
+}
 function tankOf() {
   const tanks = me().tanks || {};
   return tanks[data.trailer] || tanks[data.plate] || null;
@@ -149,11 +172,17 @@ async function sync(quiet) {
         } else if (op && op.type === 'delete' && data.me) {
           data.me.unloads = data.me.unloads.filter((u) => u.id !== op.unload_id);
         }
+        if (result.ok && op && op.order_id && data.me) {
+          data.me.orders = (data.me.orders || []).filter((o) => o.id !== op.order_id);
+        }
       }
       data.queue = data.queue.filter((item) => !done.has(item.op_id));
       saveData();
     }
+    const first = !data.me;
     data.me = await authed('/api/app/me');
+    if (first) data.seenOrders = (data.me.orders || []).map((o) => o.id);
+    else announceOrders();
     if (!data.picked) {
       data.plate = data.me.plate || '';
       data.trailer = data.me.trailer || '';
@@ -182,7 +211,7 @@ function enqueue(op) {
 
 // ----- данные дня -----
 function unloadFromOp(op) {
-  return { id: op.id, client: op.client_label, liters: op.liters, ts: op.at, day: op.day, plate: op.plate, trailer: op.trailer, comment: op.comment };
+  return { id: op.id, client: op.client_label, liters: op.liters, ts: op.at, day: op.day, plate: op.plate, trailer: op.trailer, comment: op.comment, paid: op.paid === true ? 'yes' : (op.paid === false ? 'no' : '') };
 }
 function dayOf(u) {
   return u.day || localDate(new Date(u.ts));
@@ -243,6 +272,7 @@ function renderLogin() {
         selectedDate = localDate();
         render();
         sync();
+        askPush();
       } catch (err) {
         submit.disabled = false;
         error.textContent = err.status ? err.message : 'Нет связи с сервером. Проверьте адрес и интернет.';
@@ -300,9 +330,10 @@ function renderMain() {
     el('div', { class: 'state' + (unsent || !online ? ' wait' : ''), id: 'state' }, stateText),
     vehicleBlock(),
     left !== null ? el('div', { class: 'info', id: 'left' }, 'В цистерне по весам: ', el('b', null, fmt(left) + ' л')) : null,
+    orderList(),
     el('div', { class: 'twin' },
       el('button', { id: 'go-weigh', onclick: () => { if (vehicleReady()) { weighResult = null; screen = 'weigh'; render(); } } }, 'Взвеситься'),
-      el('button', { class: 'main', id: 'new-unload', onclick: () => { if (vehicleReady()) { screen = 'unload'; render(); } } }, 'Записать выгрузку')),
+      el('button', { class: activeOrders().length ? 'plain' : 'main', id: 'new-unload', onclick: () => { if (vehicleReady()) { orderForUnload = null; screen = 'unload'; render(); } } }, activeOrders().length ? 'Выгрузка без заказа' : 'Записать выгрузку')),
     el('h2', null, selectedDate === today ? 'Слито сегодня' : 'Слито за день'),
     el('input', {
       type: 'date', id: 'day', value: selectedDate, max: today, 'aria-label': 'День',
@@ -316,11 +347,41 @@ function renderMain() {
   );
 }
 
+function orderList() {
+  const orders = activeOrders();
+  if (!orders.length) return null;
+  const today = localDate();
+  return el('section', { id: 'orders' }, el('h2', null, 'Заказы: ' + orders.length),
+    orders.map((o, i) => el('article', { class: 'trip order' },
+      el('div', { class: 'top' }, el('span', null, (i + 1) + '. ' + o.client), el('b', null, fmt(o.liters) + ' л')),
+      o.address ? el('div', { class: 'addr' }, o.address) : null,
+      el('div', { class: 'meta' }, (o.day !== today ? 'На ' + o.day.split('-').reverse().join('.') + '. ' : '') + (o.private ? 'Частное лицо: возьмите оплату. ' : '') + (o.note || '')),
+      el('div', { class: 'twin' },
+        el('button', { class: 'quiet small', onclick: () => failOrder(o) }, 'Не получилось'),
+        el('button', { class: 'main small order-done', onclick: () => { if (vehicleReady()) { orderForUnload = o; screen = 'unload'; render(); } } }, 'Слил газ')))));
+}
+function failOrder(o) {
+  const reason = el('input', { id: 'fail-reason', maxlength: 200 });
+  const error = el('div', { class: 'error', role: 'alert' });
+  const close = () => overlay.replaceChildren();
+  overlay.replaceChildren(el('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true' }, el('div', null,
+    el('p', null, `Почему не получилось слить газ: ${o.client}?`),
+    el('label', { for: 'fail-reason' }, 'Причина'), reason, error,
+    el('div', { class: 'twin' },
+      el('button', { class: 'quiet', onclick: close }, 'Отмена'),
+      el('button', { class: 'main', id: 'fail-send', onclick: () => {
+        if (!reason.value.trim()) { error.textContent = 'Напишите причину: её увидит логист.'; return; }
+        enqueue({ type: 'order_fail', order_id: o.id, reason: reason.value.trim(), at: new Date().toISOString(), label: o.client });
+        close(); toast('Логист увидит, что заказ не выполнен'); render(); sync();
+      } }, 'Отправить логисту')))));
+  reason.focus();
+}
+
 function renderUnload(u) {
   const canDelete = dayOf(u) === localDate() && u.invoice !== 'done';
   return el('article', { class: 'trip' + (u.pending ? ' pending' : '') },
     el('div', { class: 'top' }, el('span', null, u.client), el('b', null, fmt(u.liters) + ' л')),
-    el('div', { class: 'meta' }, u.plate + (u.trailer ? ' + ' + u.trailer : '') + (u.comment ? '. ' + u.comment : '')),
+    el('div', { class: 'meta' }, u.plate + (u.trailer ? ' + ' + u.trailer : '') + (u.paid === 'yes' ? '. Оплачено' : (u.paid === 'no' ? '. Не оплачено' : '')) + (u.comment ? '. ' + u.comment : '')),
     el('div', { class: 'act' },
       el('span', { class: 'meta' }, u.pending ? 'Ждёт связи' : ''),
       canDelete ? el('button', {
@@ -344,6 +405,7 @@ function deleteUnload(u) {
 function describeOp(op) {
   if (!op) return 'Запись';
   if (op.type === 'unload') return `Выгрузка ${op.client_label}, ${fmt(op.liters)} л`;
+  if (op.type === 'order_fail') return `Отказ от заказа ${op.label}`;
   return `Удаление выгрузки ${op.label}`;
 }
 
@@ -463,13 +525,31 @@ function renderUnloadForm() {
   const newWrap = el('div', { hidden: true }, el('label', { for: 'client-new' }, 'Название клиента'), newName);
   const select = el('select', {
     id: 'client',
-    onchange: () => { newWrap.hidden = select.value !== NEW; if (!newWrap.hidden) newName.focus(); },
+    onchange: () => { newWrap.hidden = select.value !== NEW; payWrap.hidden = !isPrivate(); if (!newWrap.hidden) newName.focus(); },
   },
   el('option', { value: '' }, 'Выберите клиента'),
   clients.map((c) => el('option', { value: c.id }, c.name)),
   el('option', { value: NEW }, 'Другой клиент'));
-  const amount = el('input', { id: 'liters', inputmode: 'decimal', autocomplete: 'off' });
+  const order = orderForUnload;
+  const amount = el('input', { id: 'liters', inputmode: 'decimal', autocomplete: 'off', value: order ? String(order.liters) : '' });
   const comment = el('input', { id: 'comment', maxlength: 200 });
+  // Частное лицо платит на месте: водитель отмечает, получил ли оплату
+  let paid = null;
+  const payButtons = [
+    el('button', { type: 'button', id: 'paid-yes', class: 'quiet', onclick: () => setPaid(true) }, 'Оплатил'),
+    el('button', { type: 'button', id: 'paid-no', class: 'quiet', onclick: () => setPaid(false) }, 'Не оплатил')];
+  function setPaid(value) {
+    paid = value;
+    payButtons[0].className = value ? 'on-choice' : 'quiet';
+    payButtons[1].className = value ? 'quiet' : 'on-choice';
+  }
+  const payWrap = el('div', { id: 'pay', hidden: true }, el('label', null, 'Оплата'), el('div', { class: 'twin' }, payButtons));
+  const isPrivate = () => {
+    if (order) return !!order.private;
+    if (select.value === NEW) return true;
+    const c = m.clients.find((x) => String(x.id) === select.value);
+    return !!(c && c.private);
+  };
 
   const store = (litersValue, clientId, label) => {
     const now = new Date();
@@ -478,7 +558,10 @@ function renderUnloadForm() {
       at: now.toISOString(), day: localDate(now), comment: comment.value.trim(), client_label: label,
     };
     if (clientId) op.client_id = clientId; else op.client_name = label;
+    if (order) op.order_id = order.id;
+    if (isPrivate() && paid !== null) op.paid = paid;
     enqueue(op);
+    orderForUnload = null;
     selectedDate = op.day;
     screen = 'main';
     toast('Выгрузка записана');
@@ -491,7 +574,9 @@ function renderUnloadForm() {
       error.textContent = '';
       let clientId = null;
       let label;
-      if (select.value === NEW) {
+      if (order) {
+        clientId = order.client_id; label = order.client;
+      } else if (select.value === NEW) {
         label = newName.value.trim();
         if (!label) { error.textContent = 'Укажите название клиента.'; return; }
       } else if (select.value) {
@@ -504,6 +589,7 @@ function renderUnloadForm() {
       const value = Number(amount.value.replace(',', '.').trim());
       if (!Number.isFinite(value) || value <= 0) { error.textContent = 'Укажите, сколько литров слили.'; return; }
       if (value > 200000) { error.textContent = 'Слишком большое значение: не больше 200 000 л.'; return; }
+      if (isPrivate() && paid === null && (order || select.value !== NEW)) { error.textContent = 'Отметьте, оплатил ли клиент.'; return; }
       const rounded = Math.round(value * 100) / 100;
       const limit = left !== null ? left : tank;
       if (limit !== null && rounded > limit) {
@@ -514,24 +600,27 @@ function renderUnloadForm() {
       store(rounded, clientId, label);
     },
   },
-  el('label', { for: 'client' }, 'Кому слили'), select, newWrap,
-  el('label', { for: 'liters' }, 'Сколько слили, литров'), amount,
+  order ? el('div', { class: 'info' }, el('b', null, order.client), order.address ? [el('br'), order.address] : null, el('br'), 'Нужно слить: ' + fmt(order.liters) + ' л')
+    : [el('label', { for: 'client' }, 'Кому слили'), select, newWrap],
+  el('label', { for: 'liters' }, 'Сколько слили, литров'), amount, payWrap,
   left !== null && left > 0 ? [el('p', null), el('button', { type: 'button', class: 'quiet', id: 'all-left', onclick: () => { amount.value = String(left); } }, 'Весь остаток: ' + fmt(left) + ' л')] : null,
   el('label', { for: 'comment' }, 'Комментарий, если нужен'), comment,
   el('p', null),
   el('button', { class: 'main', type: 'submit', id: 'save-unload' }, 'Записать выгрузку'),
   error);
+  payWrap.hidden = !isPrivate();
   show(
     el('button', { class: 'quiet back', id: 'back', onclick: () => { screen = 'main'; render(); } }, 'Назад'),
-    el('h1', null, 'Новая выгрузка'), el('p', null),
+    el('h1', null, order ? 'Выгрузка по заказу' : 'Новая выгрузка'), el('p', null),
     el('div', { class: 'plates' }, plate(data.plate), data.trailer ? plate(data.trailer) : null), form);
 }
 
 // ----- запуск -----
 if (session) data = load(dataKey(), emptyData());
 render();
-if (session) sync();
+if (session) { sync(); askPush(); }
 window.addEventListener('online', () => sync());
+document.addEventListener('visibilitychange', () => { if (!document.hidden && session && screen === 'main') sync(); });
 setInterval(() => { if (session && screen === 'main' && !overlay.childElementCount) sync(); }, 60000);
 // Кнопка «Назад» Android вызывает эту функцию из MainActivity.
 window.avtovesBack = function () {
