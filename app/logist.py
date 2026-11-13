@@ -26,6 +26,7 @@ from starlette.routing import Route
 from . import __version__
 from . import settings as st
 from .plates import normalize as norm_plate
+from .routing import PRECISE, RouteError, Routing, best_order
 from .stavtrack import Stavtrack, StError
 from .weighing import DriverError
 
@@ -262,7 +263,9 @@ def init_db(db):
                 db.conn.execute(f"ALTER TABLE drivers ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         for table, cols in (
                 ("clients", [("address", "TEXT NOT NULL DEFAULT ''"), ("private", "INTEGER NOT NULL DEFAULT 0"),
-                             ("manager_id", "INTEGER")]),
+                             ("manager_id", "INTEGER"), ("lat", "REAL"), ("lon", "REAL"),
+                             ("geo_precision", "TEXT NOT NULL DEFAULT ''"), ("geo_text", "TEXT NOT NULL DEFAULT ''")]),
+                ("orders", [("lat", "REAL"), ("lon", "REAL"), ("geo_precision", "TEXT NOT NULL DEFAULT ''")]),
                 ("unloads", [("order_id", "INTEGER"), ("paid", "TEXT NOT NULL DEFAULT ''"), ("paid_at", "TEXT"),
                              ("paid_by", "TEXT NOT NULL DEFAULT ''")]),
                 ("logists", [("role", "TEXT NOT NULL DEFAULT 'logist'")])):
@@ -348,6 +351,32 @@ def build_routes(ctx, public: bool) -> list[Route]:
         ctx.stavtrack = Stavtrack(db)
         db.on_weighing = getattr(db, "on_weighing", []) + [ctx.stavtrack.on_weighing]
     stv = ctx.stavtrack
+    if getattr(ctx, "routing", None) is None:
+        ctx.routing = Routing(db)
+    routing = ctx.routing
+
+    def parse_coords(value: str) -> tuple[float, float]:
+        try:
+            lat, lon = (float(x) for x in value.replace(";", ",").replace(" ", ",").split(",") if x)
+        except ValueError as exc:
+            raise Bad("Координаты: укажите широту и долготу через запятую, например 45.0428, 41.9734") from exc
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise Bad("Координаты: широта от −90 до 90, долгота от −180 до 180")
+        return lat, lon
+
+    def locate(coords: str, address: str, old: dict | None):
+        """Координаты адреса: (lat, lon, точность, найденный адрес) или None, если менять не нужно."""
+        if coords:
+            return (*parse_coords(coords), "manual", "")
+        if not address:
+            return (None, None, "", "")
+        if old and old.get("address") == address and old.get("lat") is not None and old.get("geo_precision") != "manual":
+            return None
+        try:
+            g = routing.geocode(address)
+            return (g["lat"], g["lon"], g["precision"], g["text"])
+        except RouteError as ex:
+            return (None, None, "error", str(ex))
 
     def push(driver_id: int, title: str, body_: str):
         toks = [r["token"] for r in db.q("SELECT token FROM push_tokens WHERE driver_id=?", (driver_id,))]
@@ -490,7 +519,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
             "scale": {"connected": sc["connected"], "weight": sc["weight"], "stable": sc["stable"]},
             "state_text": c["state_text"], "warning": c["warning"],
             "clients": db.q("SELECT id, name, private FROM clients WHERE active=1 ORDER BY name"),
-            "orders": db.q("SELECT o.id, o.client_id, c.name AS client, c.private, o.address, o.liters, o.day, o.note "
+            "orders": db.q("SELECT o.id, o.client_id, c.name AS client, c.private, o.address, o.liters, o.day, o.note, "
+                           "COALESCE(o.lat, c.lat) AS lat, COALESCE(o.lon, c.lon) AS lon "
                            "FROM orders o JOIN clients c ON c.id=o.client_id "
                            "WHERE o.driver_id=? AND o.status='new' ORDER BY o.day, o.pos, o.id", (d["id"],)),
             "push": pusher.ready(),
@@ -878,6 +908,12 @@ def build_routes(ctx, public: bool) -> list[Route]:
         else:
             cid = db.x("INSERT INTO clients(name,legal,legal_name,manager,active,address,private,manager_id) "
                        "VALUES(?,?,?,?,?,?,?,?)", tuple(f.values()))
+            old = []
+        loop = asyncio.get_running_loop()
+        geo = await loop.run_in_executor(None, locate, text(b.get("coords"), "Координаты", 60, False),
+                                         f["address"], old[0] if old else None)
+        if geo is not None:
+            db.x("UPDATE clients SET lat=?, lon=?, geo_precision=?, geo_text=? WHERE id=?", (*geo, cid))
         return JSONResponse({"ok": True, "id": cid})
 
     # ---- водители: логин и пароль для приложения
@@ -1056,7 +1092,82 @@ def build_routes(ctx, public: bool) -> list[Route]:
             oid = db.x("INSERT INTO orders(client_id,address,liters,driver_id,day,note,pos,created,created_by) "
                        "VALUES(?,?,?,?,?,?,?,?,?)", (*f, pos, now_iso(), u["login"]))
             push(f[3], "Новый заказ", f"{client[0]['name']}: {f[2]:g} л. {f[1]}".strip())
+        # Свой адрес заказа ищем отдельно; если адрес как у клиента — берутся координаты клиента
+        own_geo = (None, None, "")
+        if f[1] and f[1] != client[0]["address"]:
+            loop = asyncio.get_running_loop()
+            own_geo = (await loop.run_in_executor(None, locate, "", f[1], None))[:3]
+        db.x("UPDATE orders SET lat=?, lon=?, geo_precision=? WHERE id=?", (*own_geo, oid))
         return JSONResponse({"ok": True, "id": oid})
+
+    @handler
+    async def orders_route(request: Request):
+        """Лучший порядок объезда заказов водителя за день: с базы и обратно, по времени в пути с пробками."""
+        logist_of(request)
+        b = await body(request)
+        day = str(b.get("day") or "")
+        rows = db.q("SELECT o.id, o.driver_id, c.name AS client, COALESCE(o.lat, c.lat) AS lat, "
+                    "COALESCE(o.lon, c.lon) AS lon FROM orders o JOIN clients c ON c.id=o.client_id "
+                    "WHERE o.driver_id=? AND o.day=? AND o.status='new' ORDER BY o.pos, o.id", (b.get("driver_id"), day))
+        if not rows:
+            raise Bad("У этого водителя нет невыполненных заказов на эту дату")
+        missing = [r["client"] for r in rows if r["lat"] is None]
+        if missing:
+            raise Bad("Нет координат адреса: " + ", ".join(missing) + ". Исправьте адрес клиента или укажите координаты.")
+        s_ = routing.settings()
+        if s_["base_lat"] is None:
+            raise Bad("Укажите адрес базы на вкладке «Маршруты»")
+        points = [(s_["base_lat"], s_["base_lon"])] + [(r["lat"], r["lon"]) for r in rows]
+        loop = asyncio.get_running_loop()
+        try:
+            dur, dist = await loop.run_in_executor(None, routing.matrix, points)
+        except RouteError as ex:
+            raise Bad(str(ex), 502) from ex
+        order = best_order(dur)
+        path = [0] + order + [0]
+        before = [0] + list(range(1, len(points))) + [0]
+        total = lambda p, m: sum(m[a][c] for a, c in zip(p, p[1:]))      # noqa: E731
+        for pos, idx in enumerate(order, 1):
+            db.x("UPDATE orders SET pos=? WHERE id=?", (pos, rows[idx - 1]["id"]))
+        if order != list(range(1, len(points))):
+            push(rows[0]["driver_id"], "Маршрут изменён", "Порядок заказов обновлён: " +
+                 " → ".join(rows[i - 1]["client"] for i in order))
+        return JSONResponse({"ok": True, "order": [rows[i - 1]["client"] for i in order],
+                             "km": round(total(path, dist) / 1000, 1), "minutes": round(total(path, dur) / 60),
+                             "saved_minutes": round((total(before, dur) - total(path, dur)) / 60)})
+
+    @handler
+    async def routing_api(request: Request):
+        admin_of(request)
+        if request.method == "POST":
+            b = await body(request)
+            new = {"mode": "driving" if b.get("mode") == "driving" else "truck", "has_trailer": bool(b.get("has_trailer"))}
+            for key in ("geocoder_key", "router_key"):
+                if b.get(key):
+                    new[key] = text(b[key], "Ключ", 200)
+            routing.save(new)
+            address = text(b.get("base_address"), "Адрес базы", 300, False)
+            coords = text(b.get("base_coords"), "Координаты базы", 60, False)
+            loop = asyncio.get_running_loop()
+            old = routing.settings()
+            geo = await loop.run_in_executor(None, locate, coords, address,
+                                             {"address": old["base_address"], "lat": old["base_lat"],
+                                              "geo_precision": old.get("base_precision", "")})
+            new = {"base_address": address}
+            if geo is not None:
+                if geo[2] == "error":
+                    raise Bad("Адрес базы: " + geo[3])
+                new.update({"base_lat": geo[0], "base_lon": geo[1]})
+                routing.db.x("INSERT INTO kv(key, value) VALUES('yandex_base', ?) ON CONFLICT(key) DO UPDATE SET "
+                             "value=excluded.value", (json.dumps({"precision": geo[2], "text": geo[3]}),))
+            routing.save(new)
+        s_ = routing.settings()
+        base = db.q("SELECT value FROM kv WHERE key='yandex_base'")
+        base = json.loads(base[0]["value"]) if base else {"precision": "", "text": ""}
+        return JSONResponse({"geocoder_key_set": bool(s_["geocoder_key"]), "router_key_set": bool(s_["router_key"]),
+                             "base_address": s_["base_address"], "base_lat": s_["base_lat"], "base_lon": s_["base_lon"],
+                             "base_precision": base["precision"], "base_text": base["text"],
+                             "mode": s_["mode"], "has_trailer": s_["has_trailer"]})
 
     @handler
     async def order_cancel(request: Request):
@@ -1139,11 +1250,15 @@ def build_routes(ctx, public: bool) -> list[Route]:
         return JSONResponse({"ok": True})
 
     # ---- карта: где сейчас машины
+    def places():
+        s_ = routing.settings()
+        return {"clients": db.q("SELECT name, address, lat, lon, geo_precision FROM clients "
+                                "WHERE active=1 AND lat IS NOT NULL"),
+                "base": {"lat": s_["base_lat"], "lon": s_["base_lon"]} if s_["base_lat"] is not None else None}
+
     @handler
     async def map_api(request: Request):
         logist_of(request)
-        if not stv.ready():
-            return JSONResponse({"configured": False, "vehicles": [], "unlinked": [], "error": None})
         loop = asyncio.get_running_loop()
         today = datetime.now().strftime("%Y-%m-%dT00:00:00")
 
@@ -1181,10 +1296,13 @@ def build_routes(ctx, public: bool) -> list[Route]:
                     "today_l": round(done["l"], 2), "today_n": done["n"], "orders": orders,
                     "gas_left_l": road["left_l"] if road else None})
             return {"configured": True, "vehicles": vehicles, "unlinked": unlinked, "error": None}
+
+        if not stv.ready():
+            return JSONResponse({"configured": False, "vehicles": [], "unlinked": [], "error": None, **places()})
         try:
-            return JSONResponse(await loop.run_in_executor(None, work))
+            return JSONResponse({**(await loop.run_in_executor(None, work)), **places()})
         except StError as ex:
-            return JSONResponse({"configured": True, "vehicles": [], "unlinked": [], "error": str(ex)})
+            return JSONResponse({"configured": True, "vehicles": [], "unlinked": [], "error": str(ex), **places()})
 
     # ---- взвешивания с фото
     @handler
@@ -1267,6 +1385,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/unloads/{uid}/paid", paid_mark, methods=["POST"]),
         Route("/api/logist/orders", orders_api, methods=["GET", "POST"]),
         Route("/api/logist/orders/{oid:int}/cancel", order_cancel, methods=["POST"]),
+        Route("/api/logist/orders/route", orders_route, methods=["POST"]),
+        Route("/api/logist/routing", routing_api, methods=["GET", "POST"]),
         Route("/api/logist/orders/{oid:int}/seen", order_note_done, methods=["POST"]),
         Route("/api/logist/weighings", weighings_api),
         Route("/api/logist/map", map_api),

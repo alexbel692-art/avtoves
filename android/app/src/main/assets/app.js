@@ -356,9 +356,17 @@ function orderList() {
       el('div', { class: 'top' }, el('span', null, (i + 1) + '. ' + o.client), el('b', null, fmt(o.liters) + ' л')),
       o.address ? el('div', { class: 'addr' }, o.address) : null,
       el('div', { class: 'meta' }, (o.day !== today ? 'На ' + o.day.split('-').reverse().join('.') + '. ' : '') + (o.private ? 'Частное лицо: возьмите оплату. ' : '') + (o.note || '')),
+      o.lat !== null && o.lat !== undefined ? el('button', { class: 'quiet small nav', onclick: () => openNavigator(o) }, 'Открыть в навигаторе') : null,
       el('div', { class: 'twin' },
         el('button', { class: 'quiet small', onclick: () => failOrder(o) }, 'Не получилось'),
         el('button', { class: 'main small order-done', onclick: () => { if (vehicleReady()) { orderForUnload = o; screen = 'unload'; render(); } } }, 'Слил газ')))));
+}
+function openNavigator(o) {
+  // В приложении открывается установленный навигатор, в браузере — Яндекс Карты
+  try {
+    if (native && native.openMap) { native.openMap(o.lat, o.lon, o.client); return; }
+  } catch (e) { /* нет моста */ }
+  window.open(`https://yandex.ru/maps/?rtext=~${o.lat},${o.lon}&rtt=auto`, '_blank');
 }
 function failOrder(o) {
   const reason = el('input', { id: 'fail-reason', maxlength: 200 });

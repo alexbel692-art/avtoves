@@ -3,7 +3,10 @@ package ru.avtoves.driver;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.webkit.JavascriptInterface;
@@ -22,6 +25,24 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void notify(String title, String text) {
             Notifier.show(MainActivity.this, title, text);
+        }
+
+        /** Открывает точку в установленном навигаторе (Яндекс Навигатор, Яндекс Карты и т. п.). */
+        @JavascriptInterface
+        public void openMap(double lat, double lon, String label) {
+            if (Double.isNaN(lat) || Double.isNaN(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+                return;
+            }
+            String point = lat + "," + lon;
+            Intent intent = new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("geo:" + point + "?q=" + point + "(" + Uri.encode(label == null ? "" : label) + ")"));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                startActivity(intent);
+            } catch (ActivityNotFoundException noNavigator) {
+                startActivity(new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://yandex.ru/maps/?rtext=~" + point + "&rtt=auto")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            }
         }
 
         @JavascriptInterface

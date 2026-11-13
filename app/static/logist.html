@@ -166,12 +166,12 @@ async function render() {
     const manager = me.role === 'manager';
     const badge = 'Уведомления' + (me.notices ? ` (${me.notices})` : '');
     const tabs = manager ? [['notices', badge], ['report', 'Выгрузки'], ['logists', 'Мой пароль']]
-      : [['notices', badge], ['map', 'Карта'], ['orders', 'Заказы'], ['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания'], ['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']].concat(me.admin ? [['stavtrack', 'Ставтрэк']] : []);
+      : [['notices', badge], ['map', 'Карта'], ['orders', 'Заказы'], ['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания'], ['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']].concat(me.admin ? [['stavtrack', 'Ставтрэк'], ['routing', 'Маршруты']] : []);
     if (!tabs.some(([id]) => id === tab)) tab = 'notices';
     const head = el('header', null, el('h1', null, manager ? 'АвтоВес: менеджер' : 'АвтоВес: логист'),
       el('nav', null, tabs.map(([id, name]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, name))),
       el('button', { id: 'logout', onclick: () => { setToken(null); render(); } }, 'Выйти (' + me.login + ')'));
-    const body = await ({ notices: renderNotices, map: renderMap, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack })[tab]();
+    const body = await ({ notices: renderNotices, map: renderMap, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting })[tab]();
     if (run !== renderCount) return;
     view.replaceChildren(head, body);
     if (tab === 'map') startMap();
@@ -215,7 +215,8 @@ function clientFields(c) {
       { value: 'legal', label: 'Юрлицо: после выгрузки выставляется счёт' },
       { value: 'private', label: 'Частное лицо: водитель отмечает оплату' },
       { value: 'own', label: 'Свой объект: без счёта и оплаты' }] },
-    { name: 'address', label: 'Адрес выгрузки', value: c ? c.address : '', maxlength: 300 },
+    { name: 'address', label: 'Адрес выгрузки (координаты найдутся по нему)', value: c ? c.address : '', maxlength: 300 },
+    { name: 'coords', label: 'Координаты вручную: широта, долгота (если адрес нашёлся неточно)', value: c && c.geo_precision === 'manual' ? `${c.lat}, ${c.lon}` : '', maxlength: 60 },
     { name: 'legal_name', label: 'Юрлицо для счёта, если отличается от названия', value: c ? c.legal_name : '', maxlength: 200 },
     { name: 'manager_id', label: 'Менеджер клиента', value: c && c.manager_id ? c.manager_id : '',
       options: [{ value: '', label: 'Не указан' }].concat(refs.managers.map((m) => ({ value: m.id, label: m.name || m.login }))) },
@@ -225,7 +226,7 @@ function clientKind(c) {
   return !c ? 'legal' : (c.legal ? 'legal' : (c.private ? 'private' : 'own'));
 }
 function clientBody(c, v, active) {
-  return { id: c ? c.id : undefined, name: v.name, kind: v.kind, address: v.address, legal_name: v.legal_name, manager: c ? c.manager : '', manager_id: v.manager_id ? Number(v.manager_id) : null, active };
+  return { id: c ? c.id : undefined, name: v.name, kind: v.kind, address: v.address, coords: v.coords || (c && c.geo_precision === 'manual' && v.coords === undefined ? `${c.lat}, ${c.lon}` : ''), legal_name: v.legal_name, manager: c ? c.manager : '', manager_id: v.manager_id ? Number(v.manager_id) : null, active };
 }
 function editClient(c) {
   form(c ? 'Клиент: ' + c.name : 'Добавить клиента', clientFields(c), c ? 'Сохранить' : 'Добавить клиента',
@@ -321,6 +322,7 @@ async function renderReport() {
 
 // ----- заказы -----
 const orderFilter = { from: today, to: today };
+let routeResult = '';
 async function renderOrders() {
   const rows = await api('/api/logist/orders?' + query(orderFilter));
   const set = (key) => (e) => { orderFilter[key] = e.target.value; render(); };
@@ -336,6 +338,16 @@ async function renderOrders() {
       { name: 'note', label: 'Примечание для водителя', value: o ? o.note : '', maxlength: 300 },
     ], o ? 'Сохранить' : 'Отправить водителю', (v) => api('/api/logist/orders', 'POST', { id: o ? o.id : undefined, client_id: Number(v.client_id), address: v.address, liters: v.liters, driver_id: Number(v.driver_id), day: v.day, note: v.note }));
   };
+  const withOrders = drivers.filter((d) => rows.some((o) => o.driver_id === d.id && o.status === 'new' && o.day === orderFilter.to));
+  const calcRoute = () => {
+    if (!withOrders.length) { confirmBox('На ' + orderFilter.to.split('-').reverse().join('.') + ' нет невыполненных заказов.', 'Понятно', async () => {}); return; }
+    form('Маршрут на ' + orderFilter.to.split('-').reverse().join('.'), [
+      { name: 'driver_id', label: 'Водитель', value: withOrders[0].id, options: withOrders.map((d) => ({ value: d.id, label: d.name })) },
+    ], 'Рассчитать', async (v) => {
+      const r = await api('/api/logist/orders/route', 'POST', { driver_id: Number(v.driver_id), day: orderFilter.to });
+      routeResult = `Маршрут с базы и обратно: ${r.order.join(' → ')}. ${fmt(r.km)} км, ${Math.floor(r.minutes / 60)} ч ${r.minutes % 60} мин с учётом пробок` + (r.saved_minutes > 0 ? `, на ${r.saved_minutes} мин быстрее прежнего порядка.` : '.');
+    });
+  };
   const status = (o) => ({
     new: 'У водителя', cancelled: 'Отменён',
     done: el('span', { class: 'good' }, 'Выполнен: ' + fmt(o.fact) + ' л' + (o.paid === 'no' ? ', не оплачено' : (o.paid === 'yes' ? ', оплачено' : ''))),
@@ -345,11 +357,13 @@ async function renderOrders() {
     el('div', { class: 'controls' },
       el('label', null, 'С даты', el('input', { type: 'date', value: orderFilter.from, onchange: set('from') })),
       el('label', null, 'По дату', el('input', { type: 'date', value: orderFilter.to, onchange: set('to') })),
-      el('button', { class: 'primary', id: 'add-order', onclick: () => edit(null) }, 'Новый заказ')),
+      el('button', { class: 'primary', id: 'add-order', onclick: () => edit(null) }, 'Новый заказ'),
+      el('button', { id: 'calc-route', onclick: calcRoute }, 'Рассчитать маршрут')),
+    routeResult ? el('p', { class: 'note', id: 'route-result' }, routeResult) : null,
     me.push ? null : el('p', { class: 'note' }, 'Уведомления через Google не настроены: водитель увидит заказ, когда откроет приложение.'),
     rows.length ? el('div', { class: 'scroll' }, el('table', { id: 'orders' },
-      el('thead', null, el('tr', null, ['Дата', 'Водитель', 'Клиент', 'Адрес'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Литры'), ['Примечание', 'Состояние', ''].map((t) => el('th', null, t)))),
-      el('tbody', null, rows.map((o) => el('tr', { class: o.status === 'cancelled' ? 'off' : null }, el('td', null, o.day.split('-').reverse().join('.')), el('td', null, o.driver), el('td', null, o.client), el('td', null, o.address),
+      el('thead', null, el('tr', null, ['Дата', 'Водитель', '№', 'Клиент', 'Адрес'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Литры'), ['Примечание', 'Состояние', ''].map((t) => el('th', null, t)))),
+      el('tbody', null, rows.map((o) => el('tr', { class: o.status === 'cancelled' ? 'off' : null }, el('td', null, o.day.split('-').reverse().join('.')), el('td', null, o.driver), el('td', null, o.status === 'new' ? o.pos : ''), el('td', null, o.client), el('td', null, o.address),
         el('td', { class: 'num' }, fmt(o.liters)), el('td', null, o.note), el('td', null, status(o)),
         el('td', null, o.status === 'done' ? null : el('div', { class: 'actions' },
           el('button', { onclick: () => edit(o) }, o.status === 'new' ? 'Изменить' : 'Отправить заново'),
@@ -414,7 +428,7 @@ function carCard(v) {
 async function updateMap() {
   const data = await api('/api/logist/map');
   if (tab !== 'map' || !map) return;
-  const opened = markers.find((m) => m.isPopupOpen());
+  const opened = markers.find((m) => m.isPopupOpen() && m.options.title);
   const openedPlate = opened ? opened.options.title : null;
   markers.forEach((m) => m.remove());
   markers = [];
@@ -423,6 +437,16 @@ async function updateMap() {
   const bounds = [];
   if (!data.configured) {
     items.push(el('p', { class: 'note' }, 'Ставтрэк не подключён. Подключите его на вкладке «Ставтрэк», и машины появятся на карте.'));
+  }
+  for (const c of data.clients || []) {
+    const fuzzy = !['exact', 'number', 'manual'].includes(c.geo_precision);
+    markers.push(L.circleMarker([c.lat, c.lon], { radius: 6, color: fuzzy ? '#b3261e' : '#14663c', weight: 2, fillOpacity: 0.5 })
+      .addTo(map).bindPopup(el('div', null, el('b', null, c.name), el('br'), c.address, fuzzy ? [el('br'), el('small', { class: 'bad' }, 'Адрес найден неточно')] : null), { autoPan: false }));
+    bounds.push([c.lat, c.lon]);
+  }
+  if (data.base) {
+    markers.push(L.circleMarker([data.base.lat, data.base.lon], { radius: 9, color: '#101b25', weight: 3, fillOpacity: 0.8 }).addTo(map).bindPopup('База', { autoPan: false }));
+    bounds.push([data.base.lat, data.base.lon]);
   }
   for (const v of data.vehicles) {
     const marker = L.marker([v.lat, v.lon], {
@@ -457,6 +481,28 @@ function startMap() {
   });
   refresh();
   mapTimer = setInterval(refresh, 30000);
+}
+
+// ----- маршруты (Яндекс) -----
+async function renderRouting() {
+  const r = await api('/api/logist/routing');
+  const setup = () => form('Настройки маршрутов', [
+    { name: 'geocoder_key', label: r.geocoder_key_set ? 'Ключ Яндекс Геокодера (пусто — не менять)' : 'Ключ Яндекс Геокодера', type: 'password' },
+    { name: 'router_key', label: r.router_key_set ? 'Ключ Матрицы расстояний (пусто — не менять)' : 'Ключ Яндекс Матрицы расстояний', type: 'password' },
+    { name: 'base_address', label: 'Адрес базы, откуда выезжают машины', value: r.base_address, maxlength: 300 },
+    { name: 'base_coords', label: 'Координаты базы вручную: широта, долгота (необязательно)', value: r.base_precision === 'manual' ? `${r.base_lat}, ${r.base_lon}` : '', maxlength: 60 },
+    { name: 'mode', label: 'Какие дороги учитывать', value: r.mode, options: [{ value: 'truck', label: 'Для грузовых машин' }, { value: 'driving', label: 'Для легковых машин' }] },
+    { name: 'has_trailer', label: 'Прицеп', value: r.has_trailer ? '1' : '0', options: [{ value: '1', label: 'Считать с прицепом' }, { value: '0', label: 'Без прицепа' }] },
+  ], 'Сохранить', (v) => api('/api/logist/routing', 'POST', { ...v, has_trailer: v.has_trailer === '1' }));
+  const precise = ['exact', 'number', 'manual'].includes(r.base_precision);
+  return el('div', null,
+    el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'routing-setup', onclick: setup }, 'Настройки')),
+    el('p', { class: 'note' }, 'Координаты адресов находит Яндекс Геокодер, порядок объезда считается по времени в пути с пробками через Яндекс Матрицу расстояний. Оба ключа выдаются в кабинете разработчика Яндекса; Матрица расстояний платная.'),
+    el('table', { id: 'routing-state' }, el('tbody', null,
+      el('tr', null, el('th', null, 'Ключ Геокодера'), el('td', null, r.geocoder_key_set ? 'Задан' : el('span', { class: 'bad' }, 'Не задан'))),
+      el('tr', null, el('th', null, 'Ключ Матрицы расстояний'), el('td', null, r.router_key_set ? 'Задан' : el('span', { class: 'bad' }, 'Не задан'))),
+      el('tr', null, el('th', null, 'База'), el('td', null, r.base_lat === null ? el('span', { class: 'bad' }, 'Адрес не задан') : [r.base_address || 'Координаты заданы вручную', el('br'),
+        el('small', { class: precise ? null : 'bad' }, `${r.base_lat}, ${r.base_lon}` + (r.base_text ? '. Найдено: ' + r.base_text : '') + (precise ? '' : '. Найдено неточно, проверьте на карте'))])))));
 }
 
 // ----- Ставтрэк -----
@@ -515,6 +561,12 @@ async function renderLegs() {
 }
 
 // ----- справочники -----
+function geoState(c) {
+  if (c.lat === null || c.lat === undefined) return el('small', { class: 'bad' }, c.geo_precision === 'error' ? 'Координаты не найдены: ' + c.geo_text : 'Координат нет');
+  if (c.geo_precision === 'manual') return el('small', null, 'Координаты заданы вручную');
+  if (c.geo_precision === 'exact' || c.geo_precision === 'number') return el('small', null, 'Найдено точно: ' + c.geo_text);
+  return el('small', { class: 'bad' }, 'Найдено неточно, проверьте на карте: ' + c.geo_text);
+}
 function managerName(c) {
   const m = refs.managers.find((x) => x.id === c.manager_id);
   return m ? (m.name || m.login) : c.manager;
@@ -525,7 +577,7 @@ function renderClients() {
       el('thead', null, el('tr', null, ['Название', 'Кто это', 'Адрес', 'Менеджер', ''].map((t) => el('th', null, t)))),
       el('tbody', null, refs.clients.map((c) => el('tr', { class: c.active ? null : 'off' }, el('td', null, c.name, c.legal_name ? [el('br'), el('small', null, c.legal_name)] : null),
         el('td', null, !c.reviewed ? el('span', { class: 'bad' }, 'Новый от водителя, проверьте') : { legal: 'Юрлицо, счёт', private: 'Частное лицо, оплата', own: 'Свой объект' }[clientKind(c)]),
-        el('td', null, c.address), el('td', null, managerName(c)),
+        el('td', null, c.address, c.address || c.lat !== null ? [el('br'), geoState(c)] : null), el('td', null, managerName(c)),
         el('td', null, el('div', { class: 'actions' }, el('button', { onclick: () => editClient(c) }, 'Изменить'),
           el('button', { onclick: async () => { await api('/api/logist/clients', 'POST', clientBody(c, { name: c.name, kind: clientKind(c), address: c.address, legal_name: c.legal_name, manager_id: c.manager_id }, !c.active)); render(); } }, c.active ? 'Скрыть' : 'Вернуть'))))))))
       : el('p', { class: 'empty' }, 'Добавьте клиентов, которым водители возят газ. Водитель может указать и нового клиента.'));

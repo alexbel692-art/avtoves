@@ -419,6 +419,13 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         desk.route("https://tile.openstreetmap.org/**", lambda route: route.abort())
         desk.click("nav [data-tab=map]")
         expect(desk.locator("#fleet")).to_contain_text("Ставтрэк не подключён")
+        desk.click("nav [data-tab=routing]")
+        expect(desk.locator("#routing-state")).to_contain_text("Не задан")
+        desk.click("nav [data-tab=orders]")
+        desk.click("#calc-route")
+        desk.click("dialog button[type=submit]")
+        expect(desk.locator("dialog .error")).to_contain_text("Нет координат адреса")
+        desk.click("dialog button:has-text('Отмена')")
         desk.click("nav [data-tab=stavtrack]")
         expect(desk.locator("#st-state")).to_have_text("Выключено")
         desk.click("#st-check")
@@ -710,3 +717,114 @@ def test_map_in_browser(env):
         expect(page.locator(".car-mark")).to_have_count(1)
         assert errors == []
         browser.close()
+
+
+class FakeYandex:
+    """Вместо Яндекса: геокодер и матрица расстояний в формате из их документации."""
+    PLACES = {  # адрес → (широта, долгота, точность)
+        "база": (45.00, 42.00, "exact"), "с. Южное, ул. Мира, 5": (45.00, 42.30, "exact"),
+        "г. Северск, АГЗС": (45.00, 42.10, "street"), "х. Дальний": (45.00, 42.20, "other")}
+
+    def __init__(self):
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        self.matrix_calls = []
+
+        async def geocode(request):
+            q = request.query_params
+            if q.get("apikey") != "geo-key":
+                return JSONResponse({"statusCode": 403}, 403)
+            assert q["lang"] == "ru_RU" and q["format"] == "json"
+            place = self.PLACES.get(q["geocode"])
+            if not place:
+                return JSONResponse({"response": {"GeoObjectCollection": {"featureMember": []}}})
+            return JSONResponse({"response": {"GeoObjectCollection": {"featureMember": [{"GeoObject": {
+                "Point": {"pos": f"{place[1]} {place[0]}"},
+                "metaDataProperty": {"GeocoderMetaData": {"precision": place[2], "text": "Россия, " + q["geocode"]}}}}]}}})
+
+        async def matrix(request):
+            q = request.query_params
+            if q.get("apikey") != "route-key":
+                return JSONResponse({"errors": ["Key not found"]}, 401)
+            origins = [tuple(map(float, p.split(","))) for p in q["origins"].split("|")]
+            dests = [tuple(map(float, p.split(","))) for p in q["destinations"].split("|")]
+            assert len(origins) * len(dests) <= 100
+            self.matrix_calls.append((len(origins), len(dests), q["mode"], q.get("has_trailer")))
+            # все точки на одной дороге: время пропорционально разнице долготы, 1 км = 1 минута
+            rows = [{"elements": [{"status": "OK", "distance": {"value": round(abs(a[1] - b[1]) * 100000)},
+                                   "duration": {"value": round(abs(a[1] - b[1]) * 6000)}} for b in dests]} for a in origins]
+            return JSONResponse({"rows": rows})
+
+        self.server, self.url = serve(Starlette(routes=[Route("/v1", geocode), Route("/v2/distancematrix", matrix)]))
+
+
+def test_addresses_and_route_from_yandex(env):
+    ctx, local, public, logist = env
+    fake = FakeYandex()
+    token = driver_token(public)
+    day = f"{datetime.now():%Y-%m-%d}"
+    ctx.routing.save({"geocoder_url": fake.url + "/v1", "router_url": fake.url + "/v2/distancematrix"})
+
+    def client(body):
+        code, res = call(public, "/api/logist/clients", "POST", body, logist)
+        assert code == 200, res
+        return next(c for c in call(public, "/api/logist/refs", token=logist)[1]["clients"] if c["id"] == res["id"])
+
+    # Без ключа клиент сохраняется, но без координат
+    c = client({"name": "Южное", "kind": "own", "address": "с. Южное, ул. Мира, 5"})
+    assert c["lat"] is None and c["geo_precision"] == "error" and "ключ" in c["geo_text"]
+    # Ключи и база: ключи обратно не отдаются; неверный адрес базы — понятная ошибка
+    code, res = call(public, "/api/logist/routing", "POST", {"geocoder_key": "geo-key", "router_key": "route-key", "base_address": "нет такого", "mode": "truck", "has_trailer": True}, logist)
+    assert code == 400 and "Адрес не найден" in res["error"]
+    res = call(public, "/api/logist/routing", "POST", {"base_address": "база", "mode": "truck", "has_trailer": True}, logist)[1]
+    assert (res["base_lat"], res["base_lon"], res["base_precision"]) == (45.0, 42.0, "exact")
+    assert res["geocoder_key_set"] and res["router_key_set"] and "geo-key" not in json.dumps(res) and "route-key" not in json.dumps(res)
+    assert call(public, "/api/logist/routing", token=token)[0] == 401
+
+    # Адреса: точный, неточный, ручные координаты, ненайденный
+    far = client({"id": c["id"], "name": "Южное", "kind": "own", "address": "с. Южное, ул. Мира, 5"})
+    assert (far["lat"], far["lon"], far["geo_precision"]) == (45.0, 42.3, "exact")
+    near = client({"name": "Северск", "kind": "own", "address": "г. Северск, АГЗС"})
+    assert near["geo_precision"] == "street" and near["lon"] == 42.1
+    mid = client({"name": "Дальний", "kind": "own", "address": "х. Дальний", "coords": "45.0, 42.2"})
+    assert (mid["lat"], mid["lon"], mid["geo_precision"]) == (45.0, 42.2, "manual")
+    lost = client({"name": "Потерянный", "kind": "own", "address": "д. Несуществующая"})
+    assert lost["lat"] is None and "не найден" in lost["geo_text"]
+    assert call(public, "/api/logist/clients", "POST", {"name": "Кривой", "kind": "own", "coords": "сорок пять"}, logist)[0] == 400
+
+    # Заказы в неудобном порядке: дальний, ближний, средний
+    for cid, liters in ((far["id"], 100), (near["id"], 200), (mid["id"], 300)):
+        call(public, "/api/logist/orders", "POST", {"client_id": cid, "liters": liters, "driver_id": 1, "day": day}, logist)
+    call(public, "/api/app/push-token", "POST", {"token": "phone"}, token)
+    before = len(ctx.pusher.sent)
+    code, res = call(public, "/api/logist/orders/route", "POST", {"driver_id": 1, "day": day}, logist)
+    assert code == 200, res
+    assert res["order"] in (["Северск", "Дальний", "Южное"], ["Южное", "Дальний", "Северск"])
+    assert (res["km"], res["minutes"], res["saved_minutes"]) == (60.0, 60, 20)
+    assert fake.matrix_calls[-1] == (4, 4, "truck", "true")
+    mine = call(public, "/api/app/me", token=token)[1]["orders"]
+    assert [o["client"] for o in mine] == res["order"] and mine[0]["lat"] == 45.0
+    assert "Маршрут изменён" in [p[1] for p in wait_push(ctx, before + 1)]
+
+    # Заказ с адресом без координат: расчёт объясняет, что исправить
+    call(public, "/api/logist/orders", "POST", {"client_id": lost["id"], "liters": 50, "driver_id": 1, "day": day}, logist)
+    code, res = call(public, "/api/logist/orders/route", "POST", {"driver_id": 1, "day": day}, logist)
+    assert code == 400 and "Потерянный" in res["error"]
+    # Свой адрес заказа ищется отдельно от адреса клиента
+    oid = call(public, f"/api/logist/orders?from={day}&to={day}", token=logist)[1][-1]["id"]
+    call(public, "/api/logist/orders", "POST", {"id": oid, "client_id": lost["id"], "liters": 50, "driver_id": 1, "day": day, "address": "г. Северск, АГЗС"}, logist)
+    assert call(public, "/api/logist/orders/route", "POST", {"driver_id": 1, "day": day}, logist)[0] == 200
+    # Больше точек, чем помещается в один запрос Яндекса (100 ячеек): матрица собирается частями
+    for i in range(8):
+        call(public, "/api/logist/orders", "POST", {"client_id": mid["id"], "liters": 10 + i, "driver_id": 1, "day": day}, logist)
+    fake.matrix_calls.clear()
+    assert call(public, "/api/logist/orders/route", "POST", {"driver_id": 1, "day": day}, logist)[0] == 200
+    assert [c[:2] for c in fake.matrix_calls] == [(7, 13), (6, 13)]
+    # Неверный ключ: понятная ошибка без самого ключа
+    ctx.routing.save({"router_key": "bad-key"})
+    code, res = call(public, "/api/logist/orders/route", "POST", {"driver_id": 1, "day": day}, logist)
+    assert code == 502 and "ключ API не принят" in res["error"] and "bad-key" not in res["error"]
+    # Карта показывает клиентов с координатами и базу
+    m = call(public, "/api/logist/map", token=logist)[1]
+    assert m["base"] == {"lat": 45.0, "lon": 42.0} and {c["name"] for c in m["clients"]} == {"Южное", "Северск", "Дальний"}
