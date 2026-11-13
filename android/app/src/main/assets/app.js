@@ -351,22 +351,26 @@ function orderList() {
   const orders = activeOrders();
   if (!orders.length) return null;
   const today = localDate();
+  const onMap = orders.filter((o) => o.lat !== null && o.lat !== undefined);
   return el('section', { id: 'orders' }, el('h2', null, 'Заказы: ' + orders.length),
+    onMap.length > 1 ? el('button', { class: 'main small nav', id: 'route-all', onclick: () => openNavigator(onMap) }, `Весь маршрут в Яндекс Картах (${onMap.length} точ.)`) : null,
     orders.map((o, i) => el('article', { class: 'trip order' },
       el('div', { class: 'top' }, el('span', null, (i + 1) + '. ' + o.client), el('b', null, fmt(o.liters) + ' л')),
       o.address ? el('div', { class: 'addr' }, o.address) : null,
       el('div', { class: 'meta' }, (o.day !== today ? 'На ' + o.day.split('-').reverse().join('.') + '. ' : '') + (o.private ? 'Частное лицо: возьмите оплату. ' : '') + (o.note || '')),
-      o.lat !== null && o.lat !== undefined ? el('button', { class: 'quiet small nav', onclick: () => openNavigator(o) }, 'Открыть в навигаторе') : null,
+      o.lat !== null && o.lat !== undefined ? el('button', { class: 'quiet small nav', onclick: () => openNavigator([o]) }, 'Маршрут в Яндекс Картах') : null,
       el('div', { class: 'twin' },
         el('button', { class: 'quiet small', onclick: () => failOrder(o) }, 'Не получилось'),
         el('button', { class: 'main small order-done', onclick: () => { if (vehicleReady()) { orderForUnload = o; screen = 'unload'; render(); } } }, 'Слил газ')))));
 }
-function openNavigator(o) {
-  // В приложении открывается установленный навигатор, в браузере — Яндекс Карты
+function openNavigator(list) {
+  // Точки в порядке объезда, который рассчитал логист; маршрут строится от текущего места водителя
+  const points = list.slice(0, 50).map((o) => `${o.lat},${o.lon}`).join('~');
   try {
-    if (native && native.openMap) { native.openMap(o.lat, o.lon, o.client); return; }
+    if (native && native.openRoute) { native.openRoute(points); return; }
+    if (native && native.openMap && list.length === 1) { native.openMap(list[0].lat, list[0].lon, list[0].client); return; }
   } catch (e) { /* нет моста */ }
-  window.open(`https://yandex.ru/maps/?rtext=~${o.lat},${o.lon}&rtt=auto`, '_blank');
+  window.open(`https://yandex.ru/maps/?rtext=~${points}&rtt=auto`, '_blank');
 }
 function failOrder(o) {
   const reason = el('input', { id: 'fail-reason', maxlength: 200 });

@@ -27,22 +27,35 @@ public class MainActivity extends Activity {
             Notifier.show(MainActivity.this, title, text);
         }
 
-        /** Открывает точку в установленном навигаторе (Яндекс Навигатор, Яндекс Карты и т. п.). */
+        /** Одна точка: маршрут от текущего места до клиента в Яндекс Картах. */
         @JavascriptInterface
         public void openMap(double lat, double lon, String label) {
-            if (Double.isNaN(lat) || Double.isNaN(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+            if (!valid(lat, lon)) {
                 return;
             }
-            String point = lat + "," + lon;
-            Intent intent = new Intent(Intent.ACTION_VIEW,
-                    Uri.parse("geo:" + point + "?q=" + point + "(" + Uri.encode(label == null ? "" : label) + ")"));
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            try {
-                startActivity(intent);
-            } catch (ActivityNotFoundException noNavigator) {
-                startActivity(new Intent(Intent.ACTION_VIEW,
-                        Uri.parse("https://yandex.ru/maps/?rtext=~" + point + "&rtt=auto")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            openRoute(lat + "," + lon);
+        }
+
+        /** Несколько точек «шир,долг~шир,долг~…» в порядке объезда: маршрут от текущего места через все. */
+        @JavascriptInterface
+        public void openRoute(String points) {
+            if (points == null || !points.matches("-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?(~-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?){0,49}")) {
+                return;
             }
+            String query = "?rtext=~" + points + "&rtt=auto";
+            // Сначала приложение Яндекс Карты, если его нет — Яндекс Карты в браузере
+            Intent app = new Intent(Intent.ACTION_VIEW, Uri.parse("yandexmaps://maps.yandex.ru/" + query))
+                    .setPackage("ru.yandex.yandexmaps").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                startActivity(app);
+            } catch (ActivityNotFoundException noApp) {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://yandex.ru/maps/" + query))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            }
+        }
+
+        private boolean valid(double lat, double lon) {
+            return !Double.isNaN(lat) && !Double.isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
         }
 
         @JavascriptInterface

@@ -898,6 +898,24 @@ def test_addresses_and_route_from_yandex(env):
     assert [o["client"] for o in mine] == res["order"] and mine[0]["lat"] == 45.0
     assert "Маршрут изменён" in [p[1] for p in wait_push(ctx, before + 1)]
 
+    # В приложении водителя: весь маршрут одной кнопкой в Яндекс Картах, точки в рассчитанном порядке
+    from playwright.sync_api import expect, sync_playwright
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.add_init_script("window.Android = { routes: [], notify() {}, requestPush() {}, openRoute(p) { this.routes.push(p); } };")
+        page.goto(APP_HTML.as_uri())
+        page.fill("#server", public)
+        page.fill("#login", "ivanov")
+        page.fill("#password", PASSWORD)
+        page.click("#enter")
+        expect(page.locator("#route-all")).to_contain_text("3 точ.")
+        page.click("#route-all")
+        page.locator("#orders article .nav").first.click()
+        coords = {o["client"]: f'{o["lat"]:g},{o["lon"]:g}' for o in mine}
+        assert page.evaluate("window.Android.routes") == ["~".join(coords[n] for n in res["order"]), coords[res["order"][0]]]
+        browser.close()
+
     # Заказ с адресом без координат: расчёт объясняет, что исправить
     call(public, "/api/logist/orders", "POST", {"client_id": lost["id"], "liters": 50, "driver_id": 1, "day": day}, logist)
     code, res = call(public, "/api/logist/orders/route", "POST", {"driver_id": 1, "day": day}, logist)
