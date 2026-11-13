@@ -5,6 +5,7 @@
 """
 import asyncio
 import io
+import calendar
 import json
 import re
 import sys
@@ -387,10 +388,10 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         # Сводка: показатели и диаграммы
         expect(desk.locator("main h1")).to_have_text("Сводка")
         expect(desk.locator("#tiles")).to_contain_text("Ждут счёта")
-        expect(desk.locator("#chart-days path.bar")).to_have_count(14)
+        expect(desk.locator("#chart-days path.bar")).to_have_count(calendar.monthrange(datetime.now().year, datetime.now().month)[1])
         expect(desk.locator("#chart-clients .fill")).to_have_count(3)
         expect(desk.locator("#chart-drivers .name")).to_have_text(["Иванов Сергей"])
-        desk.locator("#chart-days .hit").last.hover()
+        desk.locator("#chart-days .hit").nth(datetime.now().day - 1).hover()
         expect(desk.locator(".tip")).to_contain_text("выгрузок: 3")
         desk.screenshot(path=SHOTS / "home.png")
         desk.click("#tiles button:has-text('Ждут счёта')")       # плитка ведёт в нужный раздел
@@ -699,8 +700,8 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     assert call(public, "/api/logist/map", token=token)[0] == 401
 
     # Сводка для диаграмм; загрузка машин из Ставтрэка в справочник
-    d = call(public, "/api/logist/dashboard", token=logist)[1]
-    assert len(d["days"]) == 14 and d["today"]["liters"] == today_l and d["period_count"] == 1
+    d = call(public, f"/api/logist/dashboard?month={t0:%Y-%m}", token=logist)[1]
+    assert d["today"]["liters"] == today_l and d["total"]["count"] == 1
     assert d["clients"][0]["liters"] == 24000.0 and d["drivers"] == [{"name": "Иванов Сергей", "liters": 24000.0, "count": 1}]
     assert d["orders"] == {"new": 1, "done": 0, "failed": 0}
     assert call(public, "/api/logist/dashboard", token=token)[0] == 401
@@ -985,3 +986,107 @@ def test_addresses_and_route_from_yandex(env):
     # Карта показывает клиентов с координатами и базу
     m = call(public, "/api/logist/map", token=logist)[1]
     assert m["base"] == {"lat": 45.0, "lon": 42.0} and {c["name"] for c in m["clients"]} == {"Южное", "Северск", "Дальний"}
+
+
+def test_dashboard_by_days_and_months(env):
+    """Сводка: продажи по дням месяца, по месяцам за год, сравнение с прошлым месяцем; менеджер видит только своих."""
+    ctx, local, public, logist = env
+    db = ctx.db
+    for name, login in (("Анна Ким", "anna"), ("Борис Лев", "boris")):
+        call(public, "/api/logist/logists", "POST", {"name": name, "login": login, "password": "parol-menedzhera", "role": "manager"}, logist)
+    anna_id, boris_id = [r["id"] for r in db.q("SELECT id FROM logists WHERE role='manager' ORDER BY login")]
+    call(public, "/api/logist/clients", "POST", {"id": 1, "name": "АГЗС Север", "kind": "legal", "manager_id": anna_id}, logist)
+    call(public, "/api/logist/clients", "POST", {"name": "Петров И. И.", "kind": "private", "manager_id": boris_id}, logist)
+    call(public, "/api/logist/clients", "POST", {"name": "ООО Юг", "kind": "legal", "manager_id": anna_id}, logist)
+    ids = {r["name"]: r["id"] for r in db.q("SELECT id, name FROM clients")}
+    n = [0]
+
+    def sold(day, client, liters, driver="Иванов Сергей", paid=None):
+        n[0] += 1
+        db.x("INSERT INTO unloads(id, driver_id, driver, plate, client_id, liters, ts, created, paid) VALUES(?,?,?,?,?,?,?,?,?)",
+             (f"d{n[0]}", 1, driver, "Т100АА26", ids[client], liters, day + "T10:00:00", day + "T10:00:00", paid or ""))
+    # Март 2026: 3 дня продаж; февраль 2026 для сравнения; май 2025 (почти год назад) и апрель 2025 (вне года)
+    sold("2026-03-02", "АГЗС Север", 10000)
+    sold("2026-03-02", "Петров И. И.", 1000, "Петров Пётр", "no")
+    sold("2026-03-15", "ООО Юг", 6000)
+    sold("2026-03-31", "Свой склад", 3000, paid="yes")
+    sold("2026-02-10", "АГЗС Север", 16000)
+    sold("2025-04-30", "АГЗС Север", 999)
+    sold("2025-04-01", "АГЗС Север", 5000)
+    sold("2026-03-20", "АГЗС Север", 7777)
+    db.x("UPDATE unloads SET deleted='2026-03-21' WHERE liters=7777")          # удалённые не считаются
+
+    assert call(public, "/api/logist/dashboard?month=2026-13", token=logist)[0] == 400
+    d = call(public, "/api/logist/dashboard?month=2026-03", token=logist)[1]
+    assert (d["month"], d["days_in"], d["current"], d["upto"]) == ("2026-03", 31, False, 31)
+    assert d["total"] == {"liters": 20000.0, "count": 4, "clients": 4}
+    assert d["prev"] == {"liters": 16000.0, "count": 1, "clients": 1, "month": "2026-02"}
+    assert [x["liters"] for x in d["days"] if x["liters"]] == [11000.0, 6000.0, 3000.0]
+    assert d["days"][1] == {"day": "2026-03-02", "liters": 11000.0, "count": 2, "future": False}
+    assert [m["month"] for m in d["months"]][0] == "2025-04" and d["months"][-1]["month"] == "2026-03" and len(d["months"]) == 12
+    assert d["months"][0]["liters"] == 5999.0 and d["months"][-2]["liters"] == 16000.0
+    assert d["split"] == [{"name": "Юрлица", "liters": 16000.0, "count": 2}, {"name": "Частные лица", "liters": 1000.0, "count": 1},
+                          {"name": "Свои точки", "liters": 3000.0, "count": 1}]
+    assert d["managers"] == [{"name": "Анна Ким", "liters": 16000.0, "count": 2}, {"name": "Без менеджера", "liters": 3000.0, "count": 1},
+                             {"name": "Борис Лев", "liters": 1000.0, "count": 1}]
+    assert d["drivers"][1] == {"name": "Петров Пётр", "liters": 1000.0, "count": 1}
+    assert d["pay"] == {"yes": 0, "no": 1}
+
+    # Менеджер: только свои клиенты, без водителей-заказов-менеджеров
+    anna = call(public, "/api/logist/login", "POST", {"login": "anna", "password": "parol-menedzhera"})[1]["token"]
+    a = call(public, "/api/logist/dashboard?month=2026-03", token=anna)[1]
+    assert a["total"]["liters"] == 16000.0 and a["prev"]["liters"] == 16000.0 and a["managers"] is None and a["orders"] is None
+    assert {c["name"] for c in a["clients"]} == {"АГЗС Север", "ООО Юг"} and a["split"][1]["liters"] == 0
+
+    # Текущий месяц сравнивается с тем же числом дней прошлого месяца
+    now = datetime.now()
+    prev_y, prev_m = (now.year, now.month - 1) if now.month > 1 else (now.year - 1, 12)
+    prev_days = calendar.monthrange(prev_y, prev_m)[1]
+    if now.day < prev_days:
+        sold(f"{prev_y}-{prev_m:02d}-{prev_days:02d}", "АГЗС Север", 500)       # после «сегодняшнего» числа — не в сравнении
+    sold(f"{prev_y}-{prev_m:02d}-01", "АГЗС Север", 800)
+    sold(now.strftime("%Y-%m-%d"), "ООО Юг", 1200)
+    c = call(public, "/api/logist/dashboard", token=logist)[1]
+    assert c["current"] and c["upto"] == now.day and c["prev"]["liters"] == 800.0 and c["today"]["liters"] == 1200.0
+    assert [x["future"] for x in c["days"]].count(False) == now.day
+
+    from playwright.sync_api import expect, sync_playwright
+    SHOTS.mkdir(exist_ok=True)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 1000})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(public + "/logist")
+        page.fill("#l-login", "olga")
+        page.fill("#l-pass", "parol-logista")
+        page.click("#l-enter")
+        expect(page.locator("#m-title")).to_contain_text(str(now.year))
+        expect(page.locator("#m-next")).to_be_disabled()
+        # Клик по месяцу на годовой диаграмме открывает его
+        for _ in range((now.year - 2026) * 12 + now.month - 3 - 1):
+            page.click("#m-prev")
+        expect(page.locator("#m-title")).to_have_text("Апрель 2026")
+        page.locator("#chart-months .hit").nth(10).click()
+        expect(page.locator("#m-title")).to_have_text("Март 2026")
+        expect(page.locator("#hero-liters")).to_have_text("20 000 л")
+        expect(page.locator("#hero-delta")).to_contain_text("+25 %")
+        expect(page.locator("#chart-split")).to_contain_text("Юрлица")
+        expect(page.locator("#chart-split")).to_contain_text("80 %")
+        expect(page.locator("#chart-managers .name")).to_have_text(["Анна Ким", "Без менеджера", "Борис Лев"])
+        page.locator("#chart-days .hit").nth(1).hover()
+        expect(page.locator(".tip")).to_have_text("02.03: 11 000 л, выгрузок: 2")
+        page.screenshot(path=SHOTS / "dashboard.png", full_page=True)
+        # Менеджер
+        page.click("#logout")
+        page.fill("#l-login", "anna")
+        page.fill("#l-pass", "parol-менеджера".replace("менеджера", "menedzhera"))
+        page.click("#l-enter")
+        expect(page.locator("#chart-managers")).to_have_count(0)
+        expect(page.locator("#chart-clients .name")).to_have_count(1)
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.reload()
+        expect(page.locator("#chart-days")).to_be_visible()
+        page.screenshot(path=SHOTS / "dashboard-phone.png", full_page=True)
+        assert errors == []
+        browser.close()

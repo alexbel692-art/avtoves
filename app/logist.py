@@ -740,35 +740,82 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def dashboard(request: Request):
-        """Сводка для главной страницы кабинета: объёмы по дням, клиенты, водители, заказы."""
+        """Сводка: продажи (литры) по дням выбранного месяца и по месяцам за год, сравнение с прошлым месяцем,
+        клиенты, водители, менеджеры, типы клиентов. Менеджер видит только своих клиентов."""
         u = staff(request)
         owner = own(u)
         mine, margs = ("", ()) if owner is None else (" AND c.manager_id=?", (owner,))
-        days = 14
         now = datetime.now()
-        start = (now - timedelta(days=days - 1)).strftime("%Y-%m-%d")
-        today = now.strftime("%Y-%m-%d")
-        base = ("FROM unloads u JOIN clients c ON c.id=u.client_id WHERE u.deleted IS NULL AND u.ts>=?" + mine)
-        per_day = {r["d"]: r for r in db.q(
-            f"SELECT substr(u.ts,1,10) AS d, SUM(u.liters) AS l, COUNT(*) AS n {base} GROUP BY d", (start, *margs))}
-        series = []
-        for i in range(days):
-            d = (now - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
-            row = per_day.get(d)
-            series.append({"day": d, "liters": round(row["l"], 2) if row else 0, "count": row["n"] if row else 0})
+        month = request.query_params.get("month") or now.strftime("%Y-%m")
+        if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", month):
+            raise Bad("Некорректный месяц")
+        y, m = int(month[:4]), int(month[5:])
 
-        def top(col):
-            return [{"name": r["label"] or "Не указан", "liters": round(r["l"], 2), "count": r["n"]} for r in db.q(
-                f"SELECT {col} AS label, SUM(u.liters) AS l, COUNT(*) AS n {base} GROUP BY {col} ORDER BY l DESC LIMIT 8",
-                (start, *margs))]
-        out = {"days": series, "clients": top("c.name"), "drivers": top("u.driver"),
-               "today": series[-1], "period_liters": round(sum(x["liters"] for x in series), 2),
-               "period_count": sum(x["count"] for x in series),
-               "invoices": db.q("SELECT COUNT(*) AS n FROM unloads u JOIN clients c ON c.id=u.client_id WHERE "
-                                "u.deleted IS NULL AND u.invoice='pending'" + mine, margs)[0]["n"],
-               "unpaid": db.q("SELECT COUNT(*) AS n FROM unloads u JOIN clients c ON c.id=u.client_id WHERE "
-                              "u.deleted IS NULL AND u.paid='no'" + mine, margs)[0]["n"], "orders": None, "on_road": None}
+        def shift(y_, m_, k):
+            i = y_ * 12 + m_ - 1 + k
+            return i // 12, i % 12 + 1
+
+        def ym(y_, m_):
+            return f"{y_:04d}-{m_:02d}"
+        ny, nm = shift(y, m, 1)
+        py, pm = shift(y, m, -1)
+        days_in = (datetime(ny, nm, 1) - datetime(y, m, 1)).days
+        current = month == now.strftime("%Y-%m")
+        upto = now.day if current else days_in          # для сравнения берём столько же дней прошлого месяца
+        base = "FROM unloads u JOIN clients c ON c.id=u.client_id WHERE u.deleted IS NULL"
+
+        def total(start, end):
+            r = db.q(f"SELECT COALESCE(SUM(u.liters),0) AS l, COUNT(*) AS n, COUNT(DISTINCT u.client_id) AS k "
+                     f"{base} AND u.ts>=? AND u.ts<?" + mine, (start, end, *margs))[0]
+            return {"liters": round(r["l"], 2), "count": r["n"], "clients": r["k"]}
+        start, end = ym(y, m) + "-01", ym(ny, nm) + "-01"
+        per_day = {r["d"]: r for r in db.q(
+            f"SELECT substr(u.ts,1,10) AS d, SUM(u.liters) AS l, COUNT(*) AS n {base} AND u.ts>=? AND u.ts<?{mine} GROUP BY d",
+            (start, end, *margs))}
+        days = []
+        for d in range(1, days_in + 1):
+            key = f"{month}-{d:02d}"
+            r = per_day.get(key)
+            days.append({"day": key, "liters": round(r["l"], 2) if r else 0, "count": r["n"] if r else 0,
+                         "future": current and d > now.day})
+        prev_end = ym(py, pm) + f"-{min(upto, (datetime(y, m, 1) - datetime(py, pm, 1)).days):02d}T23:59:59"
+        # 12 месяцев, заканчивая выбранным
+        my, mm = shift(y, m, -11)
+        per_month = {r["mo"]: r for r in db.q(
+            f"SELECT substr(u.ts,1,7) AS mo, SUM(u.liters) AS l, COUNT(*) AS n {base} AND u.ts>=? AND u.ts<?{mine} GROUP BY mo",
+            (ym(my, mm) + "-01", end, *margs))}
+        months = []
+        for k in range(12):
+            yy, mo = shift(my, mm, k)
+            r = per_month.get(ym(yy, mo))
+            months.append({"month": ym(yy, mo), "liters": round(r["l"], 2) if r else 0, "count": r["n"] if r else 0})
+
+        def top(col, limit=8, none="Не указан"):
+            return [{"name": r["label"] or none, "liters": round(r["l"], 2), "count": r["n"]} for r in db.q(
+                f"SELECT {col} AS label, SUM(u.liters) AS l, COUNT(*) AS n {base} AND u.ts>=? AND u.ts<?{mine} "
+                f"GROUP BY {col} ORDER BY l DESC LIMIT {limit}", (start, end, *margs))]
+        kinds = {r["k"]: r for r in db.q(
+            f"SELECT CASE WHEN c.private=1 THEN 'private' WHEN c.legal=1 THEN 'legal' ELSE 'own' END AS k, "
+            f"SUM(u.liters) AS l, COUNT(*) AS n {base} AND u.ts>=? AND u.ts<?{mine} GROUP BY k", (start, end, *margs))}
+        split = [{"name": name, "liters": round(kinds[k]["l"], 2) if k in kinds else 0, "count": kinds[k]["n"] if k in kinds else 0}
+                 for k, name in (("legal", "Юрлица"), ("private", "Частные лица"), ("own", "Свои точки"))]
+        today = now.strftime("%Y-%m-%d")
+        tday = total(today, (now + timedelta(days=1)).strftime("%Y-%m-%d"))
+        out = {"month": month, "current": current, "days_in": days_in, "upto": upto,
+               "days": days, "months": months, "total": total(start, end),
+               "prev": {**total(ym(py, pm) + "-01", prev_end), "month": ym(py, pm)},
+               "today": {**tday, "day": today}, "split": split,
+               "clients": top("c.name"), "drivers": top("u.driver"), "managers": None,
+               "pay": None, "invoices": db.q(f"SELECT COUNT(*) AS n {base} AND u.invoice='pending'" + mine, margs)[0]["n"],
+               "unpaid": db.q(f"SELECT COUNT(*) AS n {base} AND u.paid='no'" + mine, margs)[0]["n"],
+               "orders": None, "on_road": None}
+        # оплата частных лиц за месяц: сколько выгрузок оплачено и нет
+        pay = {r["p"]: r["n"] for r in db.q(
+            f"SELECT COALESCE(u.paid,'') AS p, COUNT(*) AS n {base} AND c.private=1 AND u.ts>=? AND u.ts<?{mine} GROUP BY p",
+            (start, end, *margs))}
+        out["pay"] = {"yes": pay.get("yes", 0), "no": pay.get("no", 0)}
         if owner is None:
+            out["managers"] = top("(SELECT name FROM logists WHERE id=c.manager_id)", none="Без менеджера")
             st_ = {r["status"]: r["n"] for r in db.q(
                 "SELECT status, COUNT(*) AS n FROM orders WHERE day=? GROUP BY status", (today,))}
             out["orders"] = {"new": st_.get("new", 0), "done": st_.get("done", 0), "failed": st_.get("failed", 0)}

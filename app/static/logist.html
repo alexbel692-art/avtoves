@@ -71,6 +71,43 @@ button.tile:hover { border-color:var(--accent); }
 .tile .s { font-size:13px; color:var(--muted); }
 .tile.alert .v { color:var(--bad); }
 .dash { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.dash-head { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:-4px 0 16px; }
+.month-switch { display:inline-flex; align-items:center; gap:4px; background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:3px; }
+.month-switch b { min-width:150px; text-align:center; font-size:16px; }
+.month-switch button { border:0; font-size:20px; line-height:1; padding:4px 12px; min-height:34px; }
+.month-switch button:disabled { opacity:.3; cursor:default; }
+.hero { display:grid; grid-template-columns:minmax(300px,1.1fr) 2fr; gap:16px; margin-bottom:16px; align-items:stretch; }
+.hero .tiles { margin:0; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); }
+.hero-main { background:linear-gradient(140deg,#16365f 0%,#1d5fbf 100%); color:#fff; border:0; display:flex; flex-direction:column; gap:6px; }
+.hero-main .k { color:#c8dbf5; font-size:14px; }
+.hero-main .big { font-size:44px; font-weight:800; line-height:1.05; font-variant-numeric:tabular-nums; letter-spacing:-.5px; }
+.hero-main .big span { font-size:22px; font-weight:600; color:#c8dbf5; }
+.hero-main .delta { display:inline-block; padding:3px 9px; border-radius:20px; font-weight:700; font-size:14px; background:rgba(255,255,255,.14); }
+.hero-main .delta.up { background:#dff3e4; color:#0e5a2c; }
+.hero-main .delta.down { background:#fbe3e1; color:#8e1f18; }
+.hero-main .delta small { color:inherit; font-weight:500; opacity:.85; }
+.hero-stats { display:flex; gap:22px; margin-top:auto; padding-top:10px; border-top:1px solid rgba(255,255,255,.18); flex-wrap:wrap; }
+.hero-stats div { display:flex; flex-direction:column; }
+.hero-stats b { font-size:20px; font-variant-numeric:tabular-nums; }
+.hero-stats span { font-size:12.5px; color:#c8dbf5; }
+.card-h { display:flex; justify-content:space-between; align-items:baseline; gap:10px; flex-wrap:wrap; }
+.card h2 { font-size:15px; }
+.chart .bar.soft { fill:#9ec5f4; }
+.chart .bar.faint { fill:#e3e8ee; }
+.chart .hit.pick { cursor:pointer; }
+.chart text.on { fill:var(--ink); font-weight:700; }
+.chart .avg { stroke:#15202b; stroke-dasharray:5 4; stroke-width:1.2; opacity:.55; }
+.chart text.avg-t { fill:var(--ink); font-weight:600; }
+.hbars .val small { color:var(--muted); }
+.split-bar { display:flex; gap:2px; height:22px; border-radius:6px; overflow:hidden; margin:6px 0 12px; }
+.split-bar div { min-width:3px; }
+.seg-0 { background:#2a78d6; } .seg-1 { background:#eb6834; } .seg-2 { background:#1baf7a; }
+.split-legend { display:grid; gap:6px; }
+.split-legend div { display:grid; grid-template-columns:12px 1fr auto 80px; gap:8px; align-items:center; font-size:14px; }
+.split-legend i { width:12px; height:12px; border-radius:3px; }
+.split-legend b { font-variant-numeric:tabular-nums; }
+.split-legend small { text-align:right; }
+.pay-line { margin:14px 0 0; padding-top:10px; border-top:1px solid var(--line); font-size:14px; }
 .dash .wide { grid-column:1 / -1; }
 .chart { position:relative; }
 .chart svg { width:100%; height:auto; display:block; }
@@ -123,6 +160,8 @@ details.tableview summary { cursor:pointer; color:var(--muted); }
   aside .who { margin-top:0; border-top:0; display:flex; align-items:center; gap:8px; padding-top:0; }
   main.page { padding:14px 12px 40px; }
   .dash { grid-template-columns:minmax(0,1fr); }
+  .hero { grid-template-columns:1fr; }
+  .hero-main .big { font-size:36px; }
   .map-wrap { grid-template-columns:1fr; } #map { height:60vh; } .fleet { max-height:none; }
 }
 </style>
@@ -247,7 +286,7 @@ async function render() {
       el('div', { class: 'brand' }, 'АвтоВес', el('small', null, manager ? 'Кабинет менеджера' : 'Кабинет логиста')),
       el('nav', { 'aria-label': 'Разделы' }, groups.map(([name, items]) => [name ? el('div', { class: 'group' }, name) : null,
         items.map(([id, label]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, label))])),
-      el('div', { class: 'who' }, el('div', null, me.name || me.login), el('button', { id: 'logout', onclick: () => { setToken(null); render(); } }, 'Выйти (' + me.login + ')')));
+      el('div', { class: 'who' }, el('div', null, me.name || me.login), el('button', { id: 'logout', onclick: () => { setToken(null); dashMonth = null; render(); } }, 'Выйти (' + me.login + ')')));
     const body = await ({ home: renderHome, notices: renderNotices, map: renderMap, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting })[tab]();
     if (run !== renderCount) return;
     view.className = 'app';
@@ -317,67 +356,148 @@ function tip(target, text) {
 }
 function hideTip() { if (tipNode) { tipNode.remove(); tipNode = null; } }
 const dm = (d) => d.slice(8, 10) + '.' + d.slice(5, 7);
+const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+const MON = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+const monthName = (ym) => MONTHS[Number(ym.slice(5, 7)) - 1];
+const monthTitle = (ym) => { const n = monthName(ym); return n[0].toUpperCase() + n.slice(1) + ' ' + ym.slice(0, 4); };
+const shiftMonth = (ym, k) => { const i = Number(ym.slice(0, 4)) * 12 + Number(ym.slice(5, 7)) - 1 + k; return `${Math.floor(i / 12)}-${String(i % 12 + 1).padStart(2, '0')}`; };
+// Коротко для осей и крупных цифр: 1,2 млн, 850 тыс.
+function short(v) {
+  const a = Math.abs(v);
+  if (a >= 1e6) return (v / 1e6).toLocaleString('ru-RU', { maximumFractionDigits: a >= 1e7 ? 0 : 1 }) + ' млн';
+  if (a >= 1e4) return Math.round(v / 1e3).toLocaleString('ru-RU') + ' тыс.';
+  return Math.round(v).toLocaleString('ru-RU');
+}
+const liters = (v) => fmt(Math.round(v)) + ' л';
 function niceMax(v) {
   if (v <= 0) return 1;
   const p = Math.pow(10, Math.floor(Math.log10(v)));
   return [1, 2, 3, 4, 5, 8, 10].map((m) => m * p).find((m) => m >= v);
 }
-function dayChart(days) {
-  const W = 760, H = 250, L = 52, R = 10, T = 18, B = 26;
-  const max = niceMax(Math.max(...days.map((d) => d.liters)));
-  const slot = (W - L - R) / days.length;
-  const bw = Math.min(24, slot - 6);
+const roundedBar = (x, top, bw, base) => {
+  const h = base - top;
+  if (h <= 0.5) return '';
+  const r = Math.min(4, h, bw / 2);
+  return `M${x},${base} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${base} Z`;
+};
+// Столбчатая диаграмма: одна серия, сетка, подсказки; выделенные столбики — насыщенным цветом
+function barChart({ id, label, rows, value, name, tipText, strong, faint, onPick, avg, avgText }) {
+  const narrow = window.innerWidth < 640;               // на телефоне — крупнее подписи и реже деления
+  const W = narrow ? 380 : 760, H = narrow ? 230 : 260, L = narrow ? 44 : 56, R = 8, T = 22, B = 28;
+  const max = niceMax(Math.max(...rows.map(value), avg || 0));
+  const slot = (W - L - R) / rows.length;
+  const bw = Math.max(4, Math.min(24, slot - 6));
   const y = (v) => T + (H - T - B) * (1 - v / max);
-  const best = days.reduce((a, b) => (b.liters > a.liters ? b : a), days[0]);
   const parts = [];
   for (const g of [0, 0.25, 0.5, 0.75, 1]) {
     parts.push(svg('line', { x1: L, x2: W - R, y1: y(max * g), y2: y(max * g) }),
-      svg('text', { x: L - 8, y: y(max * g) + 4, 'text-anchor': 'end' }, fmt(max * g)));
+      svg('text', { x: L - 8, y: y(max * g) + 4, 'text-anchor': 'end' }, short(max * g)));
   }
-  days.forEach((d, i) => {
+  const step = Math.ceil(rows.length / (narrow ? 7 : 16));
+  rows.forEach((d, i) => {
     const x = L + slot * i + (slot - bw) / 2;
-    const top = y(d.liters), h = H - B - top;
-    const hit = svg('rect', { class: 'hit', x: L + slot * i, y: T, width: slot, height: H - T - B, tabindex: 0, 'aria-label': `${dm(d.day)}: ${fmt(d.liters)} л, выгрузок ${d.count}` });
-    tip(hit, `${dm(d.day)}: ${fmt(d.liters)} л, выгрузок: ${d.count}`);
-    // столбик со скруглённым верхом и прямым основанием
-    const r = Math.min(4, h, bw / 2);
-    const bar = svg('path', { class: 'bar', d: h <= 0 ? '' : `M${x},${H - B} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${H - B} Z` });
-    parts.push(bar, hit);      // прозрачная область поверх столбика: подсказка появляется по всей высоте
-    if (d.liters > 0 && (d === best || i === days.length - 1)) parts.push(svg('text', { class: 'val', x: x + bw / 2, y: top - 5, 'text-anchor': 'middle' }, fmt(Math.round(d.liters))));
-    if (i % 2 === (days.length - 1) % 2) parts.push(svg('text', { x: x + bw / 2, y: H - 8, 'text-anchor': 'middle' }, dm(d.day)));
+    const top = y(value(d));
+    const cls = 'bar' + (faint && faint(d) ? ' faint' : strong && !strong(d) ? ' soft' : '');
+    parts.push(svg('path', { class: cls, d: roundedBar(x, top, bw, H - B) }));
+    const hit = svg('rect', { class: 'hit' + (onPick ? ' pick' : ''), x: L + slot * i, y: T, width: slot, height: H - T - B, tabindex: 0,
+      'aria-label': tipText(d), onclick: onPick ? () => onPick(d) : null,
+      onkeydown: onPick ? (e) => { if (e.key === 'Enter') onPick(d); } : null });
+    tip(hit, tipText(d));
+    parts.push(hit);
+    if (i % step === (rows.length - 1) % step) parts.push(svg('text', { x: x + bw / 2, y: H - 9, 'text-anchor': 'middle', class: strong && strong(d) ? 'on' : '' }, name(d)));
   });
-  return el('div', { class: 'chart', id: 'chart-days' },
-    svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Слито литров по дням за 14 дней' }, parts),
+  const best = rows.reduce((a, b2) => (value(b2) > value(a) ? b2 : a), rows[0]);
+  if (value(best) > 0) {
+    const i = rows.indexOf(best);
+    parts.push(svg('text', { class: 'val', x: L + slot * i + slot / 2, y: y(value(best)) - 6, 'text-anchor': 'middle' }, short(value(best))));
+  }
+  if (avg) {
+    parts.push(svg('line', { class: 'avg', x1: L, x2: W - R, y1: y(avg), y2: y(avg) }),
+      svg('text', { class: 'avg-t', x: L + 6, y: y(avg) - 5, 'text-anchor': 'start' }, avgText));
+  }
+  return el('div', { class: 'chart', id },
+    svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': label }, parts),
     el('details', { class: 'tableview' }, el('summary', null, 'Показать таблицей'),
-      el('table', null, el('thead', null, el('tr', null, el('th', null, 'День'), el('th', { class: 'num' }, 'Литры'), el('th', { class: 'num' }, 'Выгрузок'))),
-        el('tbody', null, days.map((d) => el('tr', null, el('td', null, dm(d.day)), el('td', { class: 'num' }, fmt(d.liters)), el('td', { class: 'num' }, d.count)))))));
+      el('table', null, el('tbody', null, rows.map((d) => el('tr', null, el('td', null, name(d)), el('td', { class: 'num' }, tipText(d))))))));
 }
-function hbars(rows, id) {
-  if (!rows.length) return el('p', { class: 'empty' }, 'За 14 дней выгрузок нет.');
+function hbars(rows, id, total) {
+  if (!rows.length) return el('p', { class: 'empty' }, 'В этом месяце выгрузок нет.');
   const max = Math.max(...rows.map((r) => r.liters));
   return el('div', { class: 'hbars', id }, rows.map((r) => {
-    const track = el('div', { class: 'track', tabindex: 0 }, el('div', { class: 'fill', style: `width:${Math.max(1, r.liters / max * 70)}%` }), el('span', { class: 'val' }, fmt(Math.round(r.liters)) + ' л'));
-    tip(track, `${r.name}: ${fmt(r.liters)} л, выгрузок: ${r.count}`);
+    const share = total ? Math.round(r.liters / total * 100) : null;
+    const track = el('div', { class: 'track', tabindex: 0 }, el('div', { class: 'fill', style: `width:${Math.max(1, r.liters / max * 62)}%` }),
+      el('span', { class: 'val' }, short(r.liters) + ' л', share !== null ? el('small', null, ' ' + share + ' %') : null));
+    tip(track, `${r.name}: ${liters(r.liters)}, выгрузок: ${r.count}`);
     return [el('div', { class: 'name', title: r.name }, r.name), track];
   }));
 }
+// Доли одного целого: одна полоса из частей, подписи под ней (цвет — только у метки, текст обычный)
+function splitBar(parts, id) {
+  const sum = parts.reduce((a, p) => a + p.liters, 0);
+  if (!sum) return el('p', { class: 'empty' }, 'В этом месяце выгрузок нет.');
+  const shown = parts.filter((p) => p.liters > 0);
+  return el('div', { class: 'split', id },
+    el('div', { class: 'split-bar' }, shown.map((p) => {
+      const seg = el('div', { class: 'seg-' + parts.indexOf(p), style: `flex:${p.liters}`, tabindex: 0 });
+      tip(seg, `${p.name}: ${liters(p.liters)} (${Math.round(p.liters / sum * 100)} %), выгрузок: ${p.count}`);
+      return seg;
+    })),
+    el('div', { class: 'split-legend' }, parts.map((p, i) => el('div', null, el('i', { class: 'seg-' + i }),
+      el('span', null, p.name), el('b', null, Math.round(p.liters / sum * 100) + ' %'), el('small', null, short(p.liters) + ' л')))));
+}
+let dashMonth = null;
 async function renderHome() {
-  const d = await api('/api/logist/dashboard');
+  const d = await api('/api/logist/dashboard' + (dashMonth ? '?month=' + dashMonth : ''));
   const go = (t) => () => { tab = t; render(); };
+  const toMonth = (ym) => { dashMonth = ym; render(); };
+  const nowD = new Date();
+  const thisMonth = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}`;
+  const delta = d.prev.liters ? Math.round((d.total.liters - d.prev.liters) / d.prev.liters * 100) : null;
+  const filled = d.days.filter((x) => !x.future);
+  const avg = filled.length ? d.total.liters / filled.length : 0;
   const tile = (k, v, sub, to, alert) => el(to ? 'button' : 'div', { class: 'tile' + (alert ? ' alert' : ''), onclick: to ? go(to) : null },
     el('div', { class: 'k' }, k), el('div', { class: 'v' }, v), el('div', { class: 's' }, sub));
+  const prevLabel = d.current ? `к 1–${d.upto} ${MON[Number(d.prev.month.slice(5, 7)) - 1]}.` : 'к ' + monthName(d.prev.month);
+  const monthIdx = d.months.findIndex((x) => x.month === d.month);
   return el('div', null,
-    el('div', { class: 'tiles', id: 'tiles' },
-      tile('Слито сегодня', fmt(Math.round(d.today.liters)) + ' л', 'выгрузок: ' + d.today.count, 'report'),
-      tile('За 14 дней', fmt(Math.round(d.period_liters)) + ' л', 'выгрузок: ' + d.period_count, 'report'),
-      d.orders ? tile('Заказы на сегодня', d.orders.new + d.orders.done + d.orders.failed, `выполнено ${d.orders.done}, у водителей ${d.orders.new}` + (d.orders.failed ? `, не выполнено ${d.orders.failed}` : ''), 'orders', d.orders.failed > 0) : null,
-      d.on_road !== null ? tile('Машин в рейсе', d.on_road, 'уехали с базы и не вернулись', 'map') : null,
-      tile('Ждут счёта', d.invoices, 'выгрузок у юрлиц', 'notices', d.invoices > 0),
-      tile('Не оплачено', d.unpaid, 'выгрузок у частных лиц', 'notices', d.unpaid > 0)),
+    el('div', { class: 'dash-head' },
+      el('div', { class: 'month-switch' },
+        el('button', { id: 'm-prev', 'aria-label': 'Предыдущий месяц', onclick: () => toMonth(shiftMonth(d.month, -1)) }, '‹'),
+        el('b', { id: 'm-title' }, monthTitle(d.month)),
+        el('button', { id: 'm-next', 'aria-label': 'Следующий месяц', disabled: d.month >= thisMonth, onclick: () => toMonth(shiftMonth(d.month, 1)) }, '›')),
+      d.month !== thisMonth ? el('button', { onclick: () => toMonth(null) }, 'Текущий месяц') : null),
+    el('div', { class: 'hero' },
+      el('div', { class: 'card hero-main' },
+        el('div', { class: 'k' }, 'Продано за ' + monthName(d.month)),
+        el('div', { class: 'big', id: 'hero-liters' }, fmt(Math.round(d.total.liters)), el('span', null, ' л')),
+        el('div', { class: 'hero-sub' },
+          delta === null ? el('span', { class: 'delta' }, 'в прошлом месяце продаж не было')
+            : el('span', { class: 'delta ' + (delta >= 0 ? 'up' : 'down'), id: 'hero-delta' }, (delta >= 0 ? '▲ +' : '▼ ') + delta + ' % ', el('small', null, prevLabel + ' (' + short(d.prev.liters) + ' л)'))),
+        el('div', { class: 'hero-stats' },
+          el('div', null, el('b', null, fmt(d.total.count)), el('span', null, 'выгрузок')),
+          el('div', null, el('b', null, fmt(d.total.clients)), el('span', null, 'клиентов')),
+          el('div', null, el('b', null, short(avg)), el('span', null, 'л в среднем за день')))),
+      el('div', { class: 'tiles', id: 'tiles' },
+        tile('Сегодня', short(d.today.liters) + ' л', 'выгрузок: ' + d.today.count, 'report'),
+        d.orders ? tile('Заказы на сегодня', d.orders.new + d.orders.done + d.orders.failed, `выполнено ${d.orders.done}, у водителей ${d.orders.new}` + (d.orders.failed ? `, не выполнено ${d.orders.failed}` : ''), 'orders', d.orders.failed > 0) : null,
+        d.on_road !== null ? tile('Машин в рейсе', d.on_road, 'уехали с базы и не вернулись', 'map') : null,
+        tile('Ждут счёта', d.invoices, 'выгрузок у юрлиц', 'notices', d.invoices > 0),
+        tile('Не оплачено', d.unpaid, 'выгрузок у частных лиц', 'notices', d.unpaid > 0))),
     el('div', { class: 'dash' },
-      el('div', { class: 'card wide' }, el('h2', null, 'Слито по дням, литров'), dayChart(d.days)),
-      el('div', { class: 'card' }, el('h2', null, 'Клиенты за 14 дней, литров'), hbars(d.clients, 'chart-clients')),
-      el('div', { class: 'card' }, el('h2', null, 'Водители за 14 дней, литров'), hbars(d.drivers, 'chart-drivers'))));
+      el('div', { class: 'card wide' }, el('div', { class: 'card-h' }, el('h2', null, 'Продажи по дням, литров'), el('small', null, monthTitle(d.month))),
+        barChart({ id: 'chart-days', label: 'Продажи по дням месяца', rows: d.days, value: (x) => x.liters, name: (x) => String(Number(x.day.slice(8))),
+          faint: (x) => x.future, tipText: (x) => `${dm(x.day)}: ${liters(x.liters)}, выгрузок: ${x.count}`,
+          avg, avgText: 'в среднем ' + short(avg) + ' л' })),
+      el('div', { class: 'card wide' }, el('div', { class: 'card-h' }, el('h2', null, 'Продажи по месяцам, литров'), el('small', null, 'нажмите на месяц, чтобы открыть его')),
+        barChart({ id: 'chart-months', label: 'Продажи по месяцам за год', rows: d.months, value: (x) => x.liters,
+          name: (x) => MON[Number(x.month.slice(5, 7)) - 1] + (x.month.endsWith('-01') || x === d.months[0] ? ' ' + x.month.slice(2, 4) : ''),
+          strong: (x) => x.month === d.month, tipText: (x) => `${monthTitle(x.month)}: ${liters(x.liters)}, выгрузок: ${x.count}`,
+          onPick: (x) => toMonth(x.month) })),
+      el('div', { class: 'card' }, el('h2', null, 'Кому продали'), splitBar(d.split, 'chart-split'),
+        d.pay && (d.pay.yes + d.pay.no) ? el('p', { class: 'pay-line' }, `Частные лица: оплачено ${d.pay.yes}, не оплачено `, el('b', { class: d.pay.no ? 'bad' : '' }, d.pay.no), ' выгрузок') : null),
+      el('div', { class: 'card' }, el('h2', null, 'Клиенты'), hbars(d.clients, 'chart-clients', d.total.liters)),
+      d.managers ? el('div', { class: 'card' }, el('h2', null, 'Менеджеры'), hbars(d.managers, 'chart-managers', d.total.liters)) : null,
+      el('div', { class: 'card' }, el('h2', null, 'Водители'), hbars(d.drivers, 'chart-drivers', d.total.liters))));
 }
 
 // ----- уведомления -----
