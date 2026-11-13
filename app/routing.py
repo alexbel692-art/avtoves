@@ -9,7 +9,7 @@ import urllib.request
 from itertools import combinations
 
 DEFAULTS = {"geocoder_key": "", "router_key": "", "base_address": "", "base_lat": None, "base_lon": None,
-            "mode": "truck", "has_trailer": True, "map_provider": "osm", "map_key": "",
+            "mode": "truck", "has_trailer": True, "map_provider": "osm", "map_key": "", "map_url": "",
             "geocoder_url": "https://geocode-maps.yandex.ru/v1",
             "router_url": "https://api.routing.yandex.net/v2/distancematrix"}
 SECRET = ("geocoder_key", "router_key")

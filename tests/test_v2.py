@@ -592,15 +592,19 @@ class FakeWiaFleet:
         async def devices(request):
             if not authed(request):
                 return Response("", 401)
-            return JSONResponse([{"id": 11, "name": "Вольво T100AA26"}, {"id": 12, "name": "Легковая"}])
+            return JSONResponse([{"id": 11, "name": "Вольво T100AA26"}, {"id": 12, "name": "Легковая"},
+                                 {"id": 13, "name": "Бочка АВ1234 77"}])
 
         async def sensors(request):
             if not authed(request):
                 return Response("", 401)
+            if request.path_params["d"] == 13:
+                return JSONResponse([{"id": 9, "deviceId": 13, "name": "Уровень ППМ", "type": "arbitrary", "param": "lls1", "unit": "%"}])
             if request.path_params["d"] != 11:
                 return JSONResponse([])
-            return JSONResponse([{"id": 5, "deviceId": 11, "name": "ДУТ бак", "type": "fuel", "param": "fuel1"},
-                                 {"id": 6, "deviceId": 11, "name": "Зажигание", "type": "ignition", "param": "ign"}])
+            return JSONResponse([{"id": 5, "deviceId": 11, "name": "ДУТ бак", "type": "fuel", "param": "fuel1", "unit": "л", "orderId": 1},
+                                 {"id": 6, "deviceId": 11, "name": "Зажигание", "type": "ignition", "param": "ign", "orderId": 2},
+                                 {"id": 7, "deviceId": 11, "name": "Служебный", "type": "voltage", "param": "pwr", "visible": False}])
 
         async def positions(request):
             if not authed(request):
@@ -611,8 +615,12 @@ class FakeWiaFleet:
                     "sensorsAttributes": {"ДУТ бак": self.fuel, "Зажигание": True}}
             other = {"deviceId": 12, "deviceTime": "2026-01-01T00:00:00Z", "latitude": 45.3, "longitude": 42.5,
                      "sensorsAttributes": {}}
+            barrel = {"deviceId": 13, "deviceTime": mine["deviceTime"], "latitude": 45.04, "longitude": 41.97,
+                      "sensorsAttributes": {"Уровень ППМ": 63.46}}
             if "deviceIds" not in request.query_params:
-                return JSONResponse([mine, other])
+                return JSONResponse([mine, other, barrel])
+            if request.query_params["deviceIds"] == "13":
+                return JSONResponse([barrel])
             if request.query_params["deviceIds"] != "11":
                 return JSONResponse([other])
             when = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=self.age_min)
@@ -649,8 +657,12 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "st-parol"}, logist)
     check = call(public, "/api/logist/stavtrack/check", token=logist)[1]
     assert "vehicles" in check, check
-    assert check["vehicles"] == [{"plate": "Т100АА26", "device": "Вольво T100AA26", "liters": 400.0, "age_s": check["vehicles"][0]["age_s"],
-                                  "note": "", "sensors": ["ДУТ бак", "Зажигание"], "linked": False}]
+    assert check["vehicles"] == [
+        {"plate": "АВ123477", "kind": "trailer", "device": "Бочка АВ1234 77", "device_id": 13, "liters": None, "age_s": check["vehicles"][0]["age_s"],
+         "note": "", "readings": [{"name": "Уровень ППМ", "type": "arbitrary", "value": 63.5, "unit": "%"}], "sensors": ["Уровень ППМ"], "linked": False},
+        {"plate": "Т100АА26", "kind": "tractor", "device": "Вольво T100AA26", "device_id": 11, "liters": 400.0, "age_s": check["vehicles"][1]["age_s"],
+         "note": "", "readings": [{"name": "ДУТ бак", "type": "fuel", "value": 400.0, "unit": "л"}, {"name": "Зажигание", "type": "ignition", "value": True, "unit": ""}],
+         "sensors": ["ДУТ бак", "Зажигание"], "linked": False}]
 
     t0 = datetime.now() - timedelta(hours=6)
     weigh(ctx, public, token, "arrival", 15000, t0)
@@ -670,18 +682,24 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     assert [w["fuel"] for w in ws] == [300.0, 400.0, 400.0]
 
     # Карта: машина, её водитель, прицеп, заказы и топливо
+    today_l = 24000.0 if (t0 + timedelta(hours=2)).date() == datetime.now().date() else 0      # прогон сразу после полуночи
     call(public, "/api/logist/orders", "POST", {"client_id": 1, "liters": 5000, "driver_id": 1, "day": f"{datetime.now():%Y-%m-%d}"}, logist)
+    ctx.stavtrack.positions_cache = (0.0, {})      # позиции для карты кэшируются на 30 секунд
     m = call(public, "/api/logist/map", token=logist)[1]
     assert m["error"] is None and m["unlinked"] == []
     [car] = m["vehicles"]
     assert (car["plate"], car["lat"], car["lon"], car["speed"], car["fuel"], car["stale"]) == ("Т100АА26", 45.04, 41.97, 62, 300.0, False)
-    assert (car["driver"], car["trailer"], car["today_l"], car["address"]) == ("Иванов Сергей", "АВ123477", 24000.0, "Ставрополь, ул. Ленина")
+    assert (car["driver"], car["trailer"], car["today_l"], car["address"]) == ("Иванов Сергей", "АВ123477", today_l, "Ставрополь, ул. Ленина")
     assert [(o["client"], o["liters"]) for o in car["orders"]] == [("АГЗС Север", 5000.0)]
+    # Все датчики машины (скрытые в Ставтрэке — нет) и датчик уровня в бочке со своего трекера
+    assert car["device_id"] == 11 and car["sensors"] == [
+        {"name": "ДУТ бак", "type": "fuel", "value": 300.0, "unit": "л"}, {"name": "Зажигание", "type": "ignition", "value": True, "unit": ""}]
+    assert car["trailer_sensors"] == [{"name": "Уровень ППМ", "type": "arbitrary", "value": 63.5, "unit": "%"}]
     assert call(public, "/api/logist/map", token=token)[0] == 401
 
     # Сводка для диаграмм; загрузка машин из Ставтрэка в справочник
     d = call(public, "/api/logist/dashboard", token=logist)[1]
-    assert len(d["days"]) == 14 and d["today"]["liters"] == 24000.0 and d["period_count"] == 1
+    assert len(d["days"]) == 14 and d["today"]["liters"] == today_l and d["period_count"] == 1
     assert d["clients"][0]["liters"] == 24000.0 and d["drivers"] == [{"name": "Иванов Сергей", "liters": 24000.0, "count": 1}]
     assert d["orders"] == {"new": 1, "done": 0, "failed": 0}
     assert call(public, "/api/logist/dashboard", token=token)[0] == 401
@@ -690,11 +708,12 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     code, res = call(public, "/api/logist/stavtrack/import", "POST", {"items": [{"device_id": 12, "name": "Легковая", "plate": ""}]}, logist)
     assert code == 400 and "госномер" in res["error"]
     res = call(public, "/api/logist/stavtrack/import", "POST", {"items": [{"device_id": 12, "name": "Легковая", "plate": "в222вв26", "kind": ""}]}, logist)[1]
-    assert res == {"ok": True, "added": 1, "linked": 1}
+    assert res == {"ok": True, "added": 1, "linked": 3}      # и машины, найденные по госномеру, привязаны насовсем
+    assert {r["plate"]: r["device_id"] for r in ctx.db.q("SELECT * FROM st_links")} == {"В222ВВ26": 12, "Т100АА26": 11, "АВ123477": 13}
     car2 = ctx.db.vehicle("В222ВВ26")
     assert (car2["model"], car2["kind"]) == ("Легковая", "") and ctx.stavtrack.device_for("В222ВВ26")["id"] == 12
     assert call(public, "/api/logist/stavtrack/import", token=logist)[1] == []
-    ctx.db.x("DELETE FROM st_links WHERE plate='В222ВВ26'")
+    ctx.db.x("DELETE FROM st_links")
     ctx.db.x("DELETE FROM vehicles WHERE plate='В222ВВ26'")
 
     # Устаревшие данные трекера в расчёт не идут, но видны с пометкой
@@ -704,7 +723,7 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     assert last["liters"] is None and "устарели" in last["note"] and "300" in last["note"]
     # Ручная привязка к другому устройству: у него нет ДУТ
     call(public, "/api/logist/stavtrack/link", "POST", {"plate": "Т100АА26", "device_id": 12}, logist)
-    v = call(public, "/api/logist/stavtrack/check", token=logist)[1]["vehicles"][0]
+    v = next(x for x in call(public, "/api/logist/stavtrack/check", token=logist)[1]["vehicles"] if x["plate"] == "Т100АА26")
     assert v["device"] == "Легковая" and v["liters"] is None and v["linked"] is True
     # Ставтрэк недоступен: взвешивание всё равно проходит
     fake.server.should_exit = True
@@ -739,8 +758,13 @@ def test_map_in_browser(env):
         expect(popup).to_contain_text("Иванов Сергей")
         expect(popup).to_contain_text("АГЗС Север")
         expect(popup).to_contain_text("топливо: 400 л")
+        expect(popup.locator(".sensors").first).to_contain_text("ДУТ бак")
+        expect(popup).to_contain_text("Уровень ППМ")
+        expect(popup).to_contain_text("63,5 %")
+        expect(page.locator("#fleet .chips")).to_contain_text("Уровень ППМ: 63,5 %")
         SHOTS.mkdir(exist_ok=True)
         page.screenshot(path=SHOTS / "map.png")
+        popup.screenshot(path=SHOTS / "map-car.png")
         page.click("nav [data-tab=report]")       # уход с карты не оставляет ошибок
         page.click("nav [data-tab=map]")
         expect(page.locator(".car-mark")).to_have_count(1)
@@ -776,6 +800,23 @@ def test_map_in_browser(env):
         page.click("nav [data-tab=report]")
         page.click("nav [data-tab=map]")
         expect(page.locator("#map .ym-mark")).to_have_count(2)
+
+        # Карта Ставтрэка по гео-ссылке: их страница, рядом наш список машин с датчиками
+        code, res = call(public, "/api/logist/routing", "POST", {"map_provider": "stavtrack", "map_url": "javascript:alert(1)"}, logist)
+        assert code == 400 and "https://" in res["error"]
+        code, res = call(public, "/api/logist/routing", "POST", {"map_provider": "stavtrack", "map_url": ""}, logist)
+        assert code == 400 and "гео-ссылку" in res["error"]
+        geo = "https://wiafleet.online/geo/abc123"
+        res = call(public, "/api/logist/routing", "POST", {"map_provider": "stavtrack", "map_url": geo, "mode": "truck", "has_trailer": True}, logist)[1]
+        assert res["map_provider"] == "stavtrack" and res["map_url"] == geo
+        page.route("https://wiafleet.online/geo/**", lambda route: route.fulfill(content_type="text/html; charset=utf-8", body="<h1>Карта Ставтрэка</h1>"))
+        page.reload()
+        page.click("nav [data-tab=map]")
+        expect(page.locator("#map iframe")).to_have_attribute("src", geo)
+        expect(page.frame_locator("#map iframe").locator("h1")).to_have_text("Карта Ставтрэка")
+        expect(page.locator("#map-state a")).to_have_attribute("href", geo)
+        expect(page.locator("#fleet .chips")).to_contain_text("ДУТ бак")
+        page.click("#fleet button:has-text('Т100АА26')")         # без маркеров кнопка ничего не ломает
         assert errors == []
         browser.close()
 

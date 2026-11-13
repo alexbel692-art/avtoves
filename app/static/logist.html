@@ -106,6 +106,11 @@ details.tableview summary { cursor:pointer; color:var(--muted); }
 .car-mark span { display:inline-block; transform:translate(-50%,-50%); white-space:nowrap; background:#fff; color:#000; border:2px solid var(--accent); border-radius:4px; padding:1px 5px; font-weight:800; font-size:13px; }
 .car-mark.old span { border-color:var(--muted); color:var(--muted); }
 .car p { margin:3px 0; }
+.car .sensors { margin:6px 0; }
+.car .sensors table { width:auto; min-width:220px; background:none; }
+.car .sensors td { padding:2px 8px 2px 0; border:0; font-size:13px; }
+.fleet .chips { font-size:13px; color:var(--ink); }
+#map iframe { width:100%; height:100%; border:0; }
 @media (max-width:860px) {
   #view.app { grid-template-columns:1fr; }
   aside { position:static; height:auto; padding:10px; }
@@ -577,6 +582,9 @@ function renderMap() {
     el('div', { class: 'error', role: 'alert', id: 'map-error' }),
     el('div', { class: 'map-wrap' }, el('div', { id: 'map' }), el('div', { class: 'fleet', id: 'fleet' })));
 }
+const sensorValue = (x) => (x.value === true ? 'вкл' : x.value === false ? 'выкл' : x.value === null ? 'нет данных' : (typeof x.value === 'number' ? fmt(x.value) : String(x.value)) + (x.unit ? ' ' + x.unit : ''));
+const sensorList = (title, list) => (list && list.length ? el('div', { class: 'sensors' }, el('b', null, title),
+  el('table', null, el('tbody', null, list.map((x) => el('tr', null, el('td', null, x.name), el('td', { class: 'num' }, sensorValue(x))))))) : null);
 function carCard(v) {
   return el('div', { class: 'car' },
     el('p', null, el('b', null, v.plate + (v.trailer ? ' + ' + v.trailer : ''))),
@@ -584,7 +592,9 @@ function carCard(v) {
     v.gas_left_l !== null ? el('p', null, 'Газа в цистерне по весам: ' + fmt(v.gas_left_l) + ' л') : null,
     el('p', null, `Слито сегодня: ${fmt(v.today_l)} л, выгрузок: ${v.today_n}`),
     v.orders.length ? el('p', null, 'Заказы: ', v.orders.map((o, i) => [el('br'), `${i + 1}. ${o.client}, ${fmt(o.liters)} л${o.address ? ', ' + o.address : ''}`])) : el('p', null, 'Заказов нет'),
-    el('p', null, `Скорость: ${v.speed} км/ч` + (v.fuel !== null ? `, топливо: ${fmt(v.fuel)} л` : '')),
+    el('p', null, `GPS: ${v.gps_valid === false ? 'нет спутников, последняя точка' : 'есть'}, скорость ${v.speed} км/ч` + (v.fuel !== null ? `, топливо: ${fmt(v.fuel)} л` : '')),
+    sensorList('Датчики машины (ID ' + v.device_id + ')', v.sensors),
+    sensorList('Датчики бочки ' + v.trailer, v.trailer_sensors),
     v.address ? el('p', null, el('small', null, v.address)) : null,
     el('p', null, el('small', null, 'Данные от ' + (v.time ? new Date(v.time).toLocaleString('ru-RU') : 'неизвестно'))));
 }
@@ -630,6 +640,15 @@ const kits = {
     },
   },
 };
+// Карта Ставтрэка: их страница по гео-ссылке, рядом — наш список машин с датчиками и заказами
+kits.stavtrack = {
+  create() {
+    document.getElementById('map').replaceChildren(el('iframe', { src: me.map.url, title: 'Карта Ставтрэка', referrerpolicy: 'no-referrer' }));
+    return { destroy() {} };
+  },
+  clear() {}, car() { return {}; }, client() { return {}; }, base() { return {}; },
+  isOpen() { return false; }, open() {}, focus() {}, fit() {},
+};
 let yandexLoading = null;
 function loadYandex(key) {
   if (window.ymaps) return new Promise((ok) => ymaps.ready(ok));
@@ -667,16 +686,21 @@ async function updateMap() {
     if (opened && opened.plate === v.plate) kit.open(mark);
     items.push(el('button', { class: v.stale ? 'old' : 'live', onclick: () => kit.focus(map, mark, [v.lat, v.lon]) },
       el('b', null, v.plate), v.driver || 'Водитель неизвестен', el('br'),
-      el('small', null, (v.stale ? 'Давно нет данных' : v.speed + ' км/ч') + `, заказов: ${v.orders.length}, слито ${fmt(v.today_l)} л`)));
+      el('small', null, (v.stale ? 'Давно нет данных' : v.speed + ' км/ч') + `, заказов: ${v.orders.length}, слито ${fmt(v.today_l)} л`),
+      [...(v.sensors || []), ...(v.trailer_sensors || [])].filter((x) => typeof x.value === 'number').length
+        ? [el('br'), el('span', { class: 'chips' }, [...(v.sensors || []), ...(v.trailer_sensors || [])].filter((x) => typeof x.value === 'number').slice(0, 4).map((x) => x.name + ': ' + sensorValue(x)).join('; '))] : null));
   }
   if (data.unlinked.length) items.push(el('p', { class: 'note', id: 'unlinked' }, 'Нет на карте: ' + data.unlinked.join(', ') + '. Привяжите их к устройствам на вкладке «Ставтрэк».'));
   document.getElementById('fleet').replaceChildren(...items);
   if (!map.fitted && points.length) { kit.fit(map, points); map.fitted = true; }
-  document.getElementById('map-state').textContent = (map.kit === 'yandex' ? 'Яндекс Карты. ' : '') + 'Обновлено в ' + new Date().toLocaleTimeString('ru-RU') + '. Обновляется каждые 30 секунд.';
+  const state = document.getElementById('map-state');
+  state.replaceChildren(map.kit === 'stavtrack' ? el('a', { href: me.map.url, target: '_blank', rel: 'noopener noreferrer' }, 'Открыть карту Ставтрэка в новой вкладке') : '', ' ');
+  state.append((map.kit === 'yandex' ? 'Яндекс Карты. ' : '') + 'Обновлено в ' + new Date().toLocaleTimeString('ru-RU') + '. Обновляется каждые 30 секунд.');
 }
 async function startMap() {
   if (!document.getElementById('map')) return;
   let kit = 'osm', note = '';
+  if (me.map && me.map.provider === 'stavtrack') kit = 'stavtrack';
   if (me.map && me.map.provider === 'yandex') {
     try { await loadYandex(me.map.key); kit = 'yandex'; } catch (e) { note = 'Яндекс Карты не загрузились (проверьте ключ и интернет), показана обычная карта.'; }
   }
@@ -698,7 +722,8 @@ async function renderRouting() {
     { name: 'router_key', label: r.router_key_set ? 'Ключ Матрицы расстояний (пусто — не менять)' : 'Ключ Яндекс Матрицы расстояний', type: 'password' },
     { name: 'base_address', label: 'Адрес базы, откуда выезжают машины', value: r.base_address, maxlength: 300 },
     { name: 'base_coords', label: 'Координаты базы вручную: широта, долгота (необязательно)', value: r.base_precision === 'manual' ? `${r.base_lat}, ${r.base_lon}` : '', maxlength: 60 },
-    { name: 'map_provider', label: 'Карта в кабинете', value: r.map_provider, options: [{ value: 'osm', label: 'OpenStreetMap (без ключа)' }, { value: 'yandex', label: 'Яндекс Карты (нужен ключ JavaScript API)' }] },
+    { name: 'map_provider', label: 'Карта в кабинете', value: r.map_provider, options: [{ value: 'osm', label: 'OpenStreetMap (без ключа)' }, { value: 'stavtrack', label: 'Карта Ставтрэка (по гео-ссылке)' }, { value: 'yandex', label: 'Яндекс Карты (нужен ключ JavaScript API)' }] },
+    { name: 'map_url', label: 'Гео-ссылка Ставтрэка (для карты Ставтрэка)', value: r.map_url },
     { name: 'map_key', label: r.map_key_set ? 'Ключ JavaScript API Яндекс Карт (пусто — не менять)' : 'Ключ JavaScript API Яндекс Карт', type: 'password' },
     { name: 'mode', label: 'Какие дороги учитывать', value: r.mode, options: [{ value: 'truck', label: 'Для грузовых машин' }, { value: 'driving', label: 'Для легковых машин' }] },
     { name: 'has_trailer', label: 'Прицеп', value: r.has_trailer ? '1' : '0', options: [{ value: '1', label: 'Считать с прицепом' }, { value: '0', label: 'Без прицепа' }] },
@@ -710,7 +735,7 @@ async function renderRouting() {
     el('table', { id: 'routing-state' }, el('tbody', null,
       el('tr', null, el('th', null, 'Ключ Геокодера'), el('td', null, r.geocoder_key_set ? 'Задан' : el('span', { class: 'bad' }, 'Не задан'))),
       el('tr', null, el('th', null, 'Ключ Матрицы расстояний'), el('td', null, r.router_key_set ? 'Задан' : el('span', { class: 'bad' }, 'Не задан'))),
-      el('tr', null, el('th', null, 'Карта в кабинете'), el('td', { id: 'map-kind' }, r.map_provider === 'yandex' ? (r.map_key_set ? 'Яндекс Карты' : el('span', { class: 'bad' }, 'Яндекс Карты выбраны, но ключ не задан — показывается OpenStreetMap')) : 'OpenStreetMap')),
+      el('tr', null, el('th', null, 'Карта в кабинете'), el('td', { id: 'map-kind' }, r.map_provider === 'stavtrack' ? 'Карта Ставтрэка' : r.map_provider === 'yandex' ? (r.map_key_set ? 'Яндекс Карты' : el('span', { class: 'bad' }, 'Яндекс Карты выбраны, но ключ не задан — показывается OpenStreetMap')) : 'OpenStreetMap')),
       el('tr', null, el('th', null, 'База'), el('td', null, r.base_lat === null ? el('span', { class: 'bad' }, 'Адрес не задан') : [r.base_address || 'Координаты заданы вручную', el('br'),
         el('small', { class: precise ? null : 'bad' }, `${r.base_lat}, ${r.base_lon}` + (r.base_text ? '. Найдено: ' + r.base_text : '') + (precise ? '' : '. Найдено неточно, проверьте на карте'))])))));
 }
@@ -739,7 +764,7 @@ async function renderStavtrack() {
     try { list = await api('/api/logist/stavtrack/import'); } catch (err) { stCheck = { error: err.message }; render(); return; }
     const error = el('div', { class: 'error', role: 'alert' });
     const rows = list.map((d) => ({ d, on: el('input', { type: 'checkbox', checked: !!d.plate, 'aria-label': 'Загрузить ' + d.name }), plate: el('input', { type: 'text', value: d.plate, 'aria-label': 'Госномер для ' + d.name }),
-      kind: el('select', { 'aria-label': 'Тип для ' + d.name }, el('option', { value: '' }, 'Одиночка'), el('option', { value: 'tractor' }, 'Тягач')) }));
+      kind: el('select', { 'aria-label': 'Тип для ' + d.name }, el('option', { value: '' }, 'Одиночка'), el('option', { value: 'tractor' }, 'Тягач'), el('option', { value: 'trailer' }, 'Прицеп (бочка)')) }));
     dlg.className = 'wide';
     dlg.replaceChildren(el('form', {
       onsubmit: async (e) => {
@@ -749,10 +774,10 @@ async function renderStavtrack() {
         catch (err) { error.textContent = err.message; }
       },
     }, el('h2', null, 'Машины из Ставтрэка'),
-    list.length ? [el('p', { class: 'note' }, 'Отметьте машины, проверьте госномер и тип. Прицепы и тару добавляют в программе оператора, вкладка «ТС».'),
+    list.length ? [el('p', { class: 'note' }, 'Отметьте машины, проверьте госномер и тип. Машина сразу привязывается к своему устройству (ID), и на карте видны её GPS и все датчики: топливо, уровень в бочке и другие. Тару и объём бочки потом укажите в программе оператора, вкладка «ТС».'),
       el('div', { class: 'pick-list' }, el('table', { id: 'st-import-table' },
-        el('thead', null, el('tr', null, el('th', null, ''), el('th', null, 'Устройство в Ставтрэке'), el('th', null, 'Госномер'), el('th', null, 'Тип'))),
-        el('tbody', null, rows.map((r) => el('tr', null, el('td', null, r.on), el('td', null, r.d.name), el('td', null, r.plate), el('td', null, r.kind))))))]
+        el('thead', null, el('tr', null, el('th', null, ''), el('th', null, 'Устройство в Ставтрэке'), el('th', { class: 'num' }, 'ID'), el('th', null, 'Госномер'), el('th', null, 'Тип'))),
+        el('tbody', null, rows.map((r) => el('tr', null, el('td', null, r.on), el('td', null, r.d.name), el('td', { class: 'num' }, r.d.device_id), el('td', null, r.plate), el('td', null, r.kind))))))]
       : el('p', { class: 'empty' }, 'Все устройства Ставтрэка уже есть в справочнике машин.'),
     error,
     el('div', { class: 'row-end' }, el('button', { type: 'button', onclick: () => dlg.close() }, 'Отмена'),
@@ -769,10 +794,12 @@ async function renderStavtrack() {
     stCheck && stCheck.error ? el('div', { class: 'error', role: 'alert', id: 'st-error' }, stCheck.error) : null,
     stCheck && stCheck.info ? el('p', { class: 'good', id: 'st-info' }, stCheck.info) : null,
     stCheck && stCheck.vehicles ? el('div', { class: 'scroll' }, el('table', { id: 'st-table' },
-      el('thead', null, el('tr', null, ['Машина', 'Устройство в Ставтрэке'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Топливо сейчас, л'), ['Замечание', ''].map((t) => el('th', null, t)))),
+      el('thead', null, el('tr', null, ['Машина', 'Устройство в Ставтрэке'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'ID'), el('th', { class: 'num' }, 'Топливо сейчас, л'), ['Датчики сейчас', ''].map((t) => el('th', null, t)))),
       el('tbody', null, stCheck.vehicles.map((v) => el('tr', null, el('td', null, v.plate), el('td', null, v.device || el('span', { class: 'bad' }, 'не найдено')),
+        el('td', { class: 'num' }, v.device_id === null ? '' : v.device_id),
         el('td', { class: 'num' }, v.liters === null ? '' : fmt(v.liters)),
-        el('td', null, v.note, v.note && v.sensors.length ? [el('br'), el('small', null, 'Датчики в данных: ' + v.sensors.join(', '))] : null),
+        el('td', null, v.note, v.readings.length ? [v.note ? el('br') : null, el('small', null, v.readings.map((x) => x.name + ': ' + sensorValue(x)).join('; '))]
+          : v.sensors.length ? [v.note ? el('br') : null, el('small', null, 'Датчики в данных: ' + v.sensors.join(', '))] : null),
         el('td', null, el('button', { onclick: () => link(v) }, 'Выбрать устройство'))))))) : null);
 }
 

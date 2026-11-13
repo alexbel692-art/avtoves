@@ -40,7 +40,7 @@ LOOKALIKE = str.maketrans("ABEKMHOPCTYX", "АВЕКМНОРСТУХ")
 def plate_key(text) -> str:
     """Госномер без пробелов и региона; латиница и кириллица считаются одинаково."""
     clean = re.sub(r"[\s\-_]+", "", str(text)).upper().translate(LOOKALIKE)
-    found = re.search(r"[А-Я]\d{3}[А-Я]{2}", clean)
+    found = re.search(r"[А-Я]\d{3}[А-Я]{2}|[А-Я]{2}\d{4}", clean)      # машина или прицеп
     return found.group(0) if found else clean
 
 
@@ -141,13 +141,46 @@ class Stavtrack:
         self.devices_cache = (time.time(), got)
         return got
 
-    def fuel_sensors(self, device_id: int) -> list[dict]:
+    def sensors(self, device_id: int) -> list[dict]:
+        """Все датчики устройства, как они настроены в Ставтрэке (ДУТ, уровень в бочке, зажигание и т. д.)."""
         ts, cached = self.sensors_cache.get(device_id, (0.0, None))
         if cached is not None and time.time() - ts < 600:
             return cached
-        got = [s for s in (self.call(f"/devices/{device_id}/sensors") or []) if s.get("type") == "fuel"]
+        got = list(self.call(f"/devices/{device_id}/sensors") or [])
         self.sensors_cache[device_id] = (time.time(), got)
         return got
+
+    def fuel_sensors(self, device_id: int) -> list[dict]:
+        return [s for s in self.sensors(device_id) if s.get("type") == "fuel"]
+
+    @staticmethod
+    def _value(values: dict, sensor: dict):
+        # значение датчика лежит под его названием; на случай другого формата пробуем id и параметр
+        for key in (sensor.get("name"), str(sensor.get("id")), sensor.get("param")):
+            v = values.get(key) if key is not None else None
+            if isinstance(v, dict):
+                v = v.get("value")
+            if v is not None and not isinstance(v, (dict, list)):
+                return key, v
+        return None, None
+
+    def readings(self, device_id: int, pos: dict | None) -> list[dict]:
+        """Показания всех видимых датчиков устройства для карты: [{name, type, value, unit}]."""
+        values = (pos or {}).get("sensorsAttributes") or {}
+        out, used = [], set()
+        for sensor in sorted(self.sensors(device_id), key=lambda x: (x.get("orderId") is None, x.get("orderId") or 0)):
+            if sensor.get("visible") is False or sensor.get("type") == "driver_assignment":
+                continue
+            key, v = self._value(values, sensor)
+            if key is not None:
+                used.add(key)
+            out.append({"name": str(sensor.get("name") or sensor.get("param") or "Датчик"), "type": sensor.get("type") or "",
+                        "value": round(v, 1) if isinstance(v, float) else v, "unit": sensor.get("unit") or ""})
+        # то, что трекер прислал, но датчиком в Ставтрэке не описано, тоже показываем
+        for key, v in values.items():
+            if key not in used and not isinstance(v, (dict, list)) and v is not None:
+                out.append({"name": str(key), "type": "", "value": round(v, 1) if isinstance(v, float) else v, "unit": ""})
+        return out[:40]
 
     def positions(self) -> dict[int, dict]:
         """Последние позиции всех устройств учётной записи (для карты), не чаще раза в 30 секунд."""
@@ -203,15 +236,10 @@ class Stavtrack:
             return out
         total, found = 0.0, 0
         for sensor in sensors:
-            # значение датчика лежит под его названием; на случай другого формата пробуем id и параметр
-            for key in (sensor.get("name"), str(sensor.get("id")), sensor.get("param")):
-                v = values.get(key) if key is not None else None
-                if isinstance(v, dict):
-                    v = v.get("value")
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    total += float(v)
-                    found += 1
-                    break
+            _, v = self._value(values, sensor)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                total += float(v)
+                found += 1
         if not found:
             out["note"] = "в данных трекера нет показания ДУТ"
             return out

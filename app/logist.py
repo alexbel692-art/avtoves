@@ -732,6 +732,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     def map_settings() -> dict:
         s_ = routing.settings()
+        if s_["map_provider"] == "stavtrack" and s_.get("map_url"):
+            return {"provider": "stavtrack", "url": s_["map_url"]}
         yandex = s_["map_provider"] == "yandex" and bool(s_["map_key"])
         # Ключ JavaScript API Яндекс Карт по своей природе виден в браузере; его ограничивают по адресу сайта
         return {"provider": "yandex" if yandex else "osm", "key": s_["map_key"] if yandex else ""}
@@ -1189,7 +1191,14 @@ def build_routes(ctx, public: bool) -> list[Route]:
         if request.method == "POST":
             b = await body(request)
             new = {"mode": "driving" if b.get("mode") == "driving" else "truck", "has_trailer": bool(b.get("has_trailer")),
-                   "map_provider": "yandex" if b.get("map_provider") == "yandex" else "osm"}
+                   "map_provider": b.get("map_provider") if b.get("map_provider") in ("yandex", "stavtrack") else "osm"}
+            if "map_url" in b:
+                url = text(b.get("map_url"), "Ссылка на карту Ставтрэка", 500, False)
+                if url and not re.fullmatch(r"https?://[^\s<>\"']+", url):
+                    raise Bad("Ссылка на карту Ставтрэка должна начинаться с https://")
+                new["map_url"] = url
+            if new["map_provider"] == "stavtrack" and not (new.get("map_url") or routing.settings().get("map_url")):
+                raise Bad("Вставьте гео-ссылку из Ставтрэка")
             for key in ("geocoder_key", "router_key", "map_key"):
                 if b.get(key):
                     new[key] = text(b[key], "Ключ", 200)
@@ -1216,7 +1225,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
                              "base_address": s_["base_address"], "base_lat": s_["base_lat"], "base_lon": s_["base_lon"],
                              "base_precision": base["precision"], "base_text": base["text"],
                              "mode": s_["mode"], "has_trailer": s_["has_trailer"],
-                             "map_provider": s_["map_provider"], "map_key_set": bool(s_["map_key"])})
+                             "map_provider": s_["map_provider"], "map_key_set": bool(s_["map_key"]),
+                             "map_url": s_.get("map_url") or ""})
 
     @handler
     async def order_cancel(request: Request):
@@ -1271,13 +1281,18 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
         def work():
             devs = stv.devices()
+            all_pos = stv.positions()
             rows = []
             for v in db.vehicles():
-                if v.get("kind") == "trailer":
-                    continue
                 f = stv.fuel(v["plate"])
-                rows.append({"plate": v["plate"], "device": f.get("device") or "", "liters": f["liters"],
-                             "age_s": f["age_s"], "note": f["note"],
+                dev = stv.device_for(v["plate"])
+                if v.get("kind") == "trailer" and not dev:
+                    continue                 # бочки без своего трекера в проверке не показываем
+                note = "" if v.get("kind") == "trailer" and "топливного" in f["note"] else f["note"]
+                rows.append({"plate": v["plate"], "kind": v.get("kind") or "", "device": f.get("device") or "",
+                             "device_id": dev["id"] if dev else None, "liters": f["liters"],
+                             "age_s": f["age_s"], "note": note,
+                             "readings": stv.readings(dev["id"], all_pos.get(dev["id"])) if dev else [],
                              "sensors": sorted(str(k) for k in (f.get("raw") or {}))[:30],
                              "linked": bool(db.q("SELECT 1 FROM st_links WHERE plate=?", (v["plate"],)))})
             return {"devices": devs, "vehicles": rows}
@@ -1288,7 +1303,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     def plate_guess(name: str) -> str:
         clean = re.sub(r"[\s\-_]+", "", name).upper().translate(str.maketrans("ABEKMHOPCTYX", "АВЕКМНОРСТУХ"))
-        found = re.search(r"[А-Я]\d{3}[А-Я]{2}\d{2,3}", clean)
+        found = re.search(r"[А-Я]\d{3}[А-Я]{2}\d{2,3}|[А-Я]{2}\d{6,7}", clean)
         return norm_plate(found.group(0))[0] if found else ""
 
     @handler
@@ -1321,12 +1336,20 @@ def build_routes(ctx, public: bool) -> list[Route]:
             if it.get("device_id") not in known:
                 raise Bad("Устройство не найдено в Ставтрэке")
             if not db.vehicle(plate):        # существующую машину не трогаем, только привязываем
-                db.save_vehicle({"plate": plate, "kind": "tractor" if it.get("kind") == "tractor" else "",
+                db.save_vehicle({"plate": plate, "kind": it.get("kind") if it.get("kind") in ("tractor", "trailer") else "",
                                  "model": " ".join(str(it.get("name") or "").split())[:60]})
                 added += 1
             db.x("INSERT INTO st_links(plate, device_id) VALUES(?,?) "
                  "ON CONFLICT(plate) DO UPDATE SET device_id=excluded.device_id", (plate, it["device_id"]))
-        return JSONResponse({"ok": True, "added": added, "linked": len(items)})
+        # машины, которые уже были в справочнике и совпали с устройством по госномеру, привязываем насовсем
+        linked = len(items)
+        for v in db.vehicles():
+            if not db.q("SELECT 1 FROM st_links WHERE plate=?", (v["plate"],)):
+                d = stv.device_for(v["plate"])
+                if d:
+                    db.x("INSERT INTO st_links(plate, device_id) VALUES(?,?)", (v["plate"], d["id"]))
+                    linked += 1
+        return JSONResponse({"ok": True, "added": added, "linked": linked})
 
     @handler
     async def stavtrack_link(request: Request):
@@ -1375,15 +1398,23 @@ def build_routes(ctx, public: bool) -> list[Route]:
                 orders = db.q("SELECT c.name AS client, o.address, o.liters FROM orders o JOIN clients c ON c.id=o.client_id "
                               "WHERE o.driver_id=? AND o.status='new' ORDER BY o.day, o.pos, o.id",
                               (driver["id"],)) if driver else []
+                trailer = (last[0]["trailer"] or "") if last else ""
+                trailer_sensors = []
+                if trailer:                  # у бочки может быть свой трекер с датчиком уровня
+                    tdev = stv.device_for(trailer)
+                    if tdev and tdev["id"] != dev["id"]:
+                        trailer_sensors = stv.readings(tdev["id"], all_pos.get(tdev["id"]))
                 c = lcfg()
                 road = legs(db, density(), c["tolerance_pct"], c["tolerance_l"], plate=v["plate"])
                 road = road[0] if road and road[0]["status"] == "open" else None
                 vehicles.append({
-                    "plate": v["plate"], "device": dev["name"], "lat": pos["latitude"], "lon": pos["longitude"],
+                    "plate": v["plate"], "device": dev["name"], "device_id": dev["id"],
+                    "lat": pos["latitude"], "lon": pos["longitude"], "gps_valid": pos.get("valid"),
+                    "sensors": stv.readings(dev["id"], pos), "trailer_sensors": trailer_sensors,
                     "speed": round(pos.get("speed") or 0), "course": pos.get("course"), "address": pos.get("address") or "",
                     "time": pos.get("deviceTime"), "age_s": f["age_s"],
                     "stale": f["age_s"] is None or f["age_s"] > 30 * 60, "fuel": f["liters"],
-                    "driver": driver["name"] if driver else "", "trailer": (last[0]["trailer"] or "") if last else "",
+                    "driver": driver["name"] if driver else "", "trailer": trailer,
                     "today_l": round(done["l"], 2), "today_n": done["n"], "orders": orders,
                     "gas_left_l": road["left_l"] if road else None})
             return {"configured": True, "vehicles": vehicles, "unlinked": unlinked, "error": None}
