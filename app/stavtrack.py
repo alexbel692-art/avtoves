@@ -44,6 +44,18 @@ def plate_key(text) -> str:
     return found.group(0) if found else clean
 
 
+def clean(v):
+    """Число из датчика: округляем; явная ошибка расчёта (датчик отключён, значения 10^27) — «нет данных»."""
+    if isinstance(v, bool) or v is None:
+        return v
+    if isinstance(v, (int, float)):
+        if v != v or abs(v) > 1e9:
+            return None
+        return round(v, 2) if isinstance(v, float) else v
+    text = str(v).strip()
+    return text[:40] if text else None
+
+
 class StError(Exception):
     pass
 
@@ -175,11 +187,12 @@ class Stavtrack:
             if key is not None:
                 used.add(key)
             out.append({"name": str(sensor.get("name") or sensor.get("param") or "Датчик"), "type": sensor.get("type") or "",
-                        "value": round(v, 1) if isinstance(v, float) else v, "unit": sensor.get("unit") or ""})
-        # то, что трекер прислал, но датчиком в Ставтрэке не описано, тоже показываем
-        for key, v in values.items():
-            if key not in used and not isinstance(v, (dict, list)) and v is not None:
-                out.append({"name": str(key), "type": "", "value": round(v, 1) if isinstance(v, float) else v, "unit": ""})
+                        "value": clean(v), "unit": sensor.get("unit") or ""})
+        # датчики в Ставтрэке не описаны — показываем то, что прислал трекер
+        if not used:
+            for key, v in values.items():
+                if not isinstance(v, (dict, list)) and v is not None:
+                    out.append({"name": str(key), "type": "", "value": clean(v), "unit": ""})
         return out[:40]
 
     def positions(self) -> dict[int, dict]:
@@ -237,6 +250,7 @@ class Stavtrack:
         total, found = 0.0, 0
         for sensor in sensors:
             _, v = self._value(values, sensor)
+            v = clean(v)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 total += float(v)
                 found += 1

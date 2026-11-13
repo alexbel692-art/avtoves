@@ -98,6 +98,7 @@ details.tableview summary { cursor:pointer; color:var(--muted); }
 .map-wrap { display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:14px; }
 #map { height:calc(100vh - 170px); min-height:420px; background:#c9d2da; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
 .fleet { display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 170px); overflow-y:auto; }
+.fleet > * { flex-shrink:0; }
 .fleet button { text-align:left; font-weight:400; padding:9px 11px; border-color:var(--line); }
 .fleet b { display:block; }
 .fleet .old { border-left:5px solid var(--muted); }
@@ -107,8 +108,11 @@ details.tableview summary { cursor:pointer; color:var(--muted); }
 .car-mark.old span { border-color:var(--muted); color:var(--muted); }
 .car p { margin:3px 0; }
 .car .sensors { margin:6px 0; }
-.car .sensors table { width:auto; min-width:220px; background:none; }
-.car .sensors td { padding:2px 8px 2px 0; border:0; font-size:13px; }
+.car .sensors table { width:100%; background:none; table-layout:fixed; }
+.car .sensors td { padding:2px 8px 2px 0; border:0; font-size:13px; overflow-wrap:anywhere; }
+.car .sensors td:first-child { width:58%; }
+.car .sensors td.empty-v { color:var(--muted); }
+.leaflet-popup-content { width:min(360px, 70vw) !important; max-height:60vh; overflow-y:auto; }
 .fleet .chips { font-size:13px; color:var(--ink); }
 #map iframe { width:100%; height:100%; border:0; }
 @media (max-width:860px) {
@@ -582,9 +586,15 @@ function renderMap() {
     el('div', { class: 'error', role: 'alert', id: 'map-error' }),
     el('div', { class: 'map-wrap' }, el('div', { id: 'map' }), el('div', { class: 'fleet', id: 'fleet' })));
 }
-const sensorValue = (x) => (x.value === true ? 'вкл' : x.value === false ? 'выкл' : x.value === null ? 'нет данных' : (typeof x.value === 'number' ? fmt(x.value) : String(x.value)) + (x.unit ? ' ' + x.unit : ''));
+const noData = (x) => x.value === null || x.value === undefined || x.value === '';
+const sensorValue = (x) => (x.value === true ? 'вкл' : x.value === false ? 'выкл' : noData(x) ? 'нет данных' : (typeof x.value === 'number' ? fmt(x.value) : String(x.value)) + (x.unit ? ' ' + x.unit : ''));
+// В списке машин — главное для газовоза: топливо и показания по бочке (СУГ, объём, масса, уровень)
+const GAS_WORDS = /суг|газ|жидк|продукт|плотн|уров|ппм|объ[её]м|масс|lls/i;
+const keySensors = (v) => [...(v.sensors || []), ...(v.trailer_sensors || [])]
+  .filter((x) => typeof x.value === 'number' && (x.type === 'fuel' || GAS_WORDS.test(x.name)))
+  .sort((a, b) => (a.type === 'fuel' ? 0 : 1) - (b.type === 'fuel' ? 0 : 1));
 const sensorList = (title, list) => (list && list.length ? el('div', { class: 'sensors' }, el('b', null, title),
-  el('table', null, el('tbody', null, list.map((x) => el('tr', null, el('td', null, x.name), el('td', { class: 'num' }, sensorValue(x))))))) : null);
+  el('table', null, el('tbody', null, list.map((x) => el('tr', null, el('td', null, x.name), el('td', { class: 'num' + (noData(x) ? ' empty-v' : '') }, sensorValue(x))))))) : null);
 function carCard(v) {
   return el('div', { class: 'car' },
     el('p', null, el('b', null, v.plate + (v.trailer ? ' + ' + v.trailer : ''))),
@@ -608,7 +618,7 @@ const kits = {
       L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; участники OpenStreetMap' }).addTo(obj);
       return obj;
     },
-    clear(m) { m.marks.forEach((x) => x.remove()); },
+    clear(m) { m.marks.forEach((x) => x.mark.remove()); },
     car(m, v) {
       return L.marker([v.lat, v.lon], { icon: L.divIcon({ className: 'car-mark' + (v.stale ? ' old' : ''), html: el('span', null, v.plate), iconSize: null }), title: v.plate })
         .addTo(m.obj).bindPopup(carCard(v), { autoPan: false });
@@ -687,8 +697,7 @@ async function updateMap() {
     items.push(el('button', { class: v.stale ? 'old' : 'live', onclick: () => kit.focus(map, mark, [v.lat, v.lon]) },
       el('b', null, v.plate), v.driver || 'Водитель неизвестен', el('br'),
       el('small', null, (v.stale ? 'Давно нет данных' : v.speed + ' км/ч') + `, заказов: ${v.orders.length}, слито ${fmt(v.today_l)} л`),
-      [...(v.sensors || []), ...(v.trailer_sensors || [])].filter((x) => typeof x.value === 'number').length
-        ? [el('br'), el('span', { class: 'chips' }, [...(v.sensors || []), ...(v.trailer_sensors || [])].filter((x) => typeof x.value === 'number').slice(0, 4).map((x) => x.name + ': ' + sensorValue(x)).join('; '))] : null));
+      keySensors(v).length ? [el('br'), el('span', { class: 'chips' }, keySensors(v).slice(0, 4).map((x) => x.name + ': ' + sensorValue(x)).join('; '))] : null));
   }
   if (data.unlinked.length) items.push(el('p', { class: 'note', id: 'unlinked' }, 'Нет на карте: ' + data.unlinked.join(', ') + '. Привяжите их к устройствам на вкладке «Ставтрэк».'));
   document.getElementById('fleet').replaceChildren(...items);

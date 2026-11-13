@@ -599,7 +599,8 @@ class FakeWiaFleet:
             if not authed(request):
                 return Response("", 401)
             if request.path_params["d"] == 13:
-                return JSONResponse([{"id": 9, "deviceId": 13, "name": "Уровень ППМ", "type": "arbitrary", "param": "lls1", "unit": "%"}])
+                return JSONResponse([{"id": 9, "deviceId": 13, "name": "Уровень ППМ", "type": "arbitrary", "param": "lls1", "unit": "%"},
+                                     {"id": 10, "deviceId": 13, "name": "Плотность", "type": "arbitrary", "param": "dens"}])
             if request.path_params["d"] != 11:
                 return JSONResponse([])
             return JSONResponse([{"id": 5, "deviceId": 11, "name": "ДУТ бак", "type": "fuel", "param": "fuel1", "unit": "л", "orderId": 1},
@@ -616,7 +617,7 @@ class FakeWiaFleet:
             other = {"deviceId": 12, "deviceTime": "2026-01-01T00:00:00Z", "latitude": 45.3, "longitude": 42.5,
                      "sensorsAttributes": {}}
             barrel = {"deviceId": 13, "deviceTime": mine["deviceTime"], "latitude": 45.04, "longitude": 41.97,
-                      "sensorsAttributes": {"Уровень ППМ": 63.46}}
+                      "sensorsAttributes": {"Уровень ППМ": 63.46, "Плотность": -6.8e26, "user_param4_4": 1}}
             if "deviceIds" not in request.query_params:
                 return JSONResponse([mine, other, barrel])
             if request.query_params["deviceIds"] == "13":
@@ -659,7 +660,7 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     assert "vehicles" in check, check
     assert check["vehicles"] == [
         {"plate": "АВ123477", "kind": "trailer", "device": "Бочка АВ1234 77", "device_id": 13, "liters": None, "age_s": check["vehicles"][0]["age_s"],
-         "note": "", "readings": [{"name": "Уровень ППМ", "type": "arbitrary", "value": 63.5, "unit": "%"}], "sensors": ["Уровень ППМ"], "linked": False},
+         "note": "", "readings": [{"name": "Уровень ППМ", "type": "arbitrary", "value": 63.46, "unit": "%"}, {"name": "Плотность", "type": "arbitrary", "value": None, "unit": ""}], "sensors": ["user_param4_4", "Плотность", "Уровень ППМ"], "linked": False},
         {"plate": "Т100АА26", "kind": "tractor", "device": "Вольво T100AA26", "device_id": 11, "liters": 400.0, "age_s": check["vehicles"][1]["age_s"],
          "note": "", "readings": [{"name": "ДУТ бак", "type": "fuel", "value": 400.0, "unit": "л"}, {"name": "Зажигание", "type": "ignition", "value": True, "unit": ""}],
          "sensors": ["ДУТ бак", "Зажигание"], "linked": False}]
@@ -694,7 +695,7 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     # Все датчики машины (скрытые в Ставтрэке — нет) и датчик уровня в бочке со своего трекера
     assert car["device_id"] == 11 and car["sensors"] == [
         {"name": "ДУТ бак", "type": "fuel", "value": 300.0, "unit": "л"}, {"name": "Зажигание", "type": "ignition", "value": True, "unit": ""}]
-    assert car["trailer_sensors"] == [{"name": "Уровень ППМ", "type": "arbitrary", "value": 63.5, "unit": "%"}]
+    assert car["trailer_sensors"] == [{"name": "Уровень ППМ", "type": "arbitrary", "value": 63.46, "unit": "%"}, {"name": "Плотность", "type": "arbitrary", "value": None, "unit": ""}]
     assert call(public, "/api/logist/map", token=token)[0] == 401
 
     # Сводка для диаграмм; загрузка машин из Ставтрэка в справочник
@@ -760,8 +761,14 @@ def test_map_in_browser(env):
         expect(popup).to_contain_text("топливо: 400 л")
         expect(popup.locator(".sensors").first).to_contain_text("ДУТ бак")
         expect(popup).to_contain_text("Уровень ППМ")
-        expect(popup).to_contain_text("63,5 %")
-        expect(page.locator("#fleet .chips")).to_contain_text("Уровень ППМ: 63,5 %")
+        expect(popup).to_contain_text("63,46 %")
+        expect(popup).not_to_contain_text("user_param")              # лишнее из трекера не показываем
+        expect(popup.locator("td.empty-v")).to_have_text(["нет данных"])   # плотность с ошибкой расчёта
+        expect(page.locator("#fleet .chips")).to_have_text("ДУТ бак: 400 л; Уровень ППМ: 63,46 %")
+        page.evaluate("updateMap()")                                  # обновление раз в 30 секунд
+        page.wait_for_timeout(500)
+        expect(page.locator(".car-mark")).to_have_count(1)
+        expect(page.locator("#map-error")).to_have_text("")
         SHOTS.mkdir(exist_ok=True)
         page.screenshot(path=SHOTS / "map.png")
         popup.screenshot(path=SHOTS / "map-car.png")

@@ -13,6 +13,13 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ "$(id -u)" -ne 0 ]; then echo "Запустите через sudo." >&2; exit 1; fi
 
+# Время на сервере — московское (иначе журнал и часы оператора отстают на 3 часа).
+# Другой пояс: TZ_NAME=Asia/Yekaterinburg sudo -E bash deploy/install.sh
+TZ_NAME="${TZ_NAME:-Europe/Moscow}"
+if [ "$(timedatectl show -p Timezone --value 2>/dev/null)" != "$TZ_NAME" ]; then
+  timedatectl set-timezone "$TZ_NAME" && echo "Часовой пояс сервера: $TZ_NAME"
+fi
+
 apt-get update -y
 apt-get install -y python3 python3-venv rsync curl libgl1 libglib2.0-0
 
