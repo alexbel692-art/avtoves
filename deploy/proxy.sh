@@ -13,13 +13,23 @@ if [ -z "$DOMAIN" ] || ! [[ "$UPSTREAM" =~ ^[0-9A-Za-z.-]+:[0-9]+$ ]]; then
   echo "Использование: sudo bash deploy/proxy.sh ДОМЕН АДРЕС_АВТОВЕС:ВНЕШНИЙ_ПОРТ" >&2; exit 1
 fi
 
+case "$DOMAIN" in
+  ваш-домен*|ves.example.ru|*example*)
+    echo "«$DOMAIN» — это пример из инструкции. Укажите свой настоящий домен." >&2; exit 1;;
+esac
+# Домен на кириллице (например, в зоне .рф) переводим в запись, понятную сертификату (Punycode)
+if printf '%s' "$DOMAIN" | LC_ALL=C grep -q '[^ -~]'; then
+  DOMAIN="$(python3 -c 'import sys; print(sys.argv[1].encode("idna").decode())' "$DOMAIN")"
+  echo "Домен в записи Punycode: $DOMAIN"
+fi
+
 apt-get update -y
 apt-get install -y nginx certbot python3-certbot-nginx curl
 
 if ! curl -fsS -m 5 "http://$UPSTREAM/api/ping" >/dev/null; then
   echo "АвтоВес не отвечает по адресу http://$UPSTREAM. Проверьте адрес, внешний порт и брандмауэр Windows." >&2; exit 1
 fi
-if curl -fsS -m 5 -o /dev/null "http://$UPSTREAM/api/op/status"; then
+if curl -fsS -m 5 -o /dev/null "http://$UPSTREAM/api/op/status" 2>/dev/null; then
   echo "Это основной порт АвтоВес. Укажите внешний порт (public_port), иначе управление весовой окажется в интернете." >&2; exit 1
 fi
 
