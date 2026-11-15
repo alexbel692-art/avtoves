@@ -36,8 +36,15 @@ fi
 cat > /etc/nginx/conf.d/avtoves-limits.conf <<EOF
 limit_req_zone \$binary_remote_addr zone=avtoves_login:10m rate=20r/m;
 limit_req_zone \$binary_remote_addr zone=avtoves_all:10m rate=20r/s;
-server_tokens off;
 EOF
+# Не показывать версию nginx (в Ubuntu эта строка уже есть в nginx.conf, часто закомментирована)
+if ! grep -Eq '^[[:space:]]*server_tokens[[:space:]]+off;' /etc/nginx/nginx.conf; then
+  if grep -Eq '^[[:space:]]*#[[:space:]]*server_tokens' /etc/nginx/nginx.conf; then
+    sed -i -E 's/^([[:space:]]*)#[[:space:]]*server_tokens.*/\1server_tokens off;/' /etc/nginx/nginx.conf
+  elif ! grep -Eq '^[[:space:]]*server_tokens' /etc/nginx/nginx.conf; then
+    sed -i -E 's/^([[:space:]]*)http[[:space:]]*\{/\1http {\n\tserver_tokens off;/' /etc/nginx/nginx.conf
+  fi
+fi
 # Запросы не на наш домен (сканеры по голому IP) — сбрасываем без ответа
 cat > /etc/nginx/sites-available/avtoves-default <<EOF
 server {
