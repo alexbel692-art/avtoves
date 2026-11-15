@@ -17,7 +17,7 @@ function save(key, value) {
 }
 
 let session = load('av.session', null);
-let lastServer = load('av.server', '');
+let lastServer = load('av.server', '') || window.AVTOVES_SERVER || '';
 let lastLogin = load('av.login', '');
 let data = null;
 let screen = 'main';

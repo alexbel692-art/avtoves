@@ -7,14 +7,15 @@ def keystoreFile = System.getenv('ANDROID_KEYSTORE_FILE')
 
 android {
     namespace 'ru.avtoves.driver'
-    compileSdk 35
+    compileSdk 36
 
     defaultConfig {
         applicationId 'ru.avtoves.driver'
         minSdk 26
-        targetSdk 34
-        versionCode((System.getenv('VERSION_CODE') ?: '1') as int)
-        versionName '2.2'
+        targetSdk 36          // Google Play с 31.08.2026 принимает только Android 16 (API 36)
+        // номер сборки для Google Play растёт сам: номер запуска сборки на GitHub + 100
+        versionCode(((System.getenv('VERSION_CODE') ?: '1') as int) + 100)
+        versionName '2.3'
     }
 
     signingConfigs {

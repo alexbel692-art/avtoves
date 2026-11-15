@@ -302,7 +302,15 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
     nb = " "
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
-        phone = browser.new_context(viewport={"width": 390, "height": 844})
+        # 360×720 при плотности 3 — снимки 1080×2160 подходят для страницы приложения в Google Play
+        phone = browser.new_context(viewport={"width": 360, "height": 720}, device_scale_factor=3, locale="ru-RU")
+
+        def store_shot(name, top="body"):
+            # без всплывающих подсказок; нужный блок — у верхнего края экрана
+            page.evaluate("""sel => { document.querySelectorAll('.toast').forEach(t => t.remove());
+              const n = document.querySelector(sel); window.scrollTo(0, n === document.body ? 0 : n.getBoundingClientRect().top + scrollY - 12); }""", top)
+            page.screenshot(path=SHOTS / "play" / name)
+        (SHOTS / "play").mkdir(exist_ok=True)
         page = phone.new_page()
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
@@ -325,6 +333,7 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         page.click("#go-weigh")
         expect(page.locator("#live-weight")).to_have_text(f"15{nb}000 кг")
         page.screenshot(path=SHOTS / "weigh.png")
+        store_shot("2-vzveshivanie.png")
         page.click("#arrival")
         expect(page.locator("#fixed-weight")).to_have_text(f"15{nb}000 кг")
         page.click("#back")
@@ -365,9 +374,11 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         page.evaluate("window.dispatchEvent(new Event('online'))")
         expect(page.locator("#orders")).to_contain_text("с. Южное, ул. Мира, 5")
         expect(page.locator(".toast")).to_contain_text("Новый заказ")
+        store_shot("1-zakazy.png", "#orders")
         page.screenshot(path=SHOTS / "orders.png", full_page=True)
         page.click("#orders .order-done")
         assert page.input_value("#liters") == "500"
+        store_shot("3-vygruzka.png")
         page.click("#save-unload")
         expect(page.locator("#unload-error")).to_contain_text("оплатил ли клиент")
         page.click("#paid-no")
@@ -1089,4 +1100,43 @@ def test_dashboard_by_days_and_months(env):
         expect(page.locator("#chart-days")).to_be_visible()
         page.screenshot(path=SHOTS / "dashboard-phone.png", full_page=True)
         assert errors == []
+        browser.close()
+
+
+def test_driver_app_store_info_and_privacy(env):
+    """Сведения для Google Play: политика конфиденциальности на обоих портах, настройка только у администратора."""
+    ctx, local, public, logist = env
+    import urllib.request
+    for base in (public, local):
+        html = urllib.request.urlopen(base + "/privacy").read().decode()
+        assert "Политика конфиденциальности" in html and "Firebase" in html and "{company}" not in html
+    info = call(public, "/api/logist/appinfo", token=logist)[1]
+    assert info["company"] == "" and info["push"] is True and info["drivers"] == 2 and info["push_drivers"] == 0
+    res = call(public, "/api/logist/appinfo", "POST", {"company": "ООО «Газ <Юг>»", "contact": "ves@example.ru"}, logist)[1]
+    assert res["company"] == "ООО «Газ <Юг>»"
+    html = urllib.request.urlopen(public + "/privacy").read().decode()
+    assert "ООО «Газ &lt;Юг&gt;»" in html and "ves@example.ru" in html and "<Юг>" not in html
+    # Менеджер и водитель настраивать не могут
+    call(public, "/api/logist/logists", "POST", {"name": "Анна", "login": "anna", "password": "parol-menedzhera", "role": "manager"}, logist)
+    anna = call(public, "/api/logist/login", "POST", {"login": "anna", "password": "parol-menedzhera"})[1]["token"]
+    assert call(public, "/api/logist/appinfo", token=anna)[0] == 403
+    assert call(public, "/api/logist/appinfo", "POST", {"company": "x"}, driver_token(public))[0] == 401
+
+    from playwright.sync_api import expect, sync_playwright
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page()
+        page.goto(public + "/logist")
+        page.fill("#l-login", "olga")
+        page.fill("#l-pass", "parol-logista")
+        page.click("#l-enter")
+        page.click("nav [data-tab=driverapp]")
+        expect(page.locator("#app-info")).to_contain_text("ООО «Газ <Юг>»")
+        expect(page.locator("#app-info")).to_contain_text("/privacy")
+        expect(page.locator("#app-info")).to_contain_text("0 из 2")
+        # Адрес сервера по умолчанию из сборки подставляется в приложение водителя
+        app = browser.new_page()
+        app.route("**/config.js", lambda route: route.fulfill(content_type="application/javascript", body="window.AVTOVES_SERVER = 'ves.example.ru';"))
+        app.goto(APP_HTML.as_uri())
+        expect(app.locator("#server")).to_have_value("ves.example.ru")
         browser.close()

@@ -1,4 +1,4 @@
-name: АвтоВес Водитель — APK
+name: АвтоВес Водитель — APK и Google Play
 
 on:
   push:
@@ -24,43 +24,69 @@ jobs:
         with:
           gradle-version: '8.14.3'
 
-      # Постоянный ключ подписи лежит в секретах репозитория (сам репозиторий открытый).
-      # Без него собирается только пробная версия: обновления поверх неё потом не установятся.
-      - name: Ключ подписи
-        id: key
+      # Адрес сервера по умолчанию (переменная репозитория AVTOVES_SERVER, например ves.example.ru)
+      - name: Адрес сервера
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          SERVER: ${{ vars.AVTOVES_SERVER }}
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
-            echo "task=assembleRelease" >> "$GITHUB_OUTPUT"
-            echo "apk=android/app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
-            echo "name=AvtoVes-Voditel-apk" >> "$GITHUB_OUTPUT"
-            echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          if [ -n "$SERVER" ]; then
+            python3 -c 'import json,sys; open(sys.argv[1],"w").write("window.AVTOVES_SERVER = " + json.dumps(sys.argv[2]) + ";\n")' \
+              android/app/src/main/assets/config.js "$SERVER"
           else
-            echo "::warning::Нет секрета ANDROID_KEYSTORE_B64 — собрана пробная версия с временным ключом"
-            echo "task=assembleDebug" >> "$GITHUB_OUTPUT"
-            echo "apk=android/app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
-            echo "name=AvtoVes-Voditel-PROBNAYA-apk" >> "$GITHUB_OUTPUT"
+            echo "::notice::Переменная AVTOVES_SERVER не задана — водитель вводит адрес сервера сам"
           fi
       # Уведомления через Google: файл настроек проекта Firebase берётся из секрета
       - name: Настройки Firebase
+        id: firebase
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           if [ -n "$GOOGLE_SERVICES_JSON" ]; then
             printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+            echo "ok=1" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::Нет секрета GOOGLE_SERVICES_JSON — приложение собрано без уведомлений через Google"
+          fi
+      # Постоянный ключ подписи лежит в секретах репозитория (сам репозиторий открытый).
+      # Без него собирается только пробная версия: в Google Play её загрузить нельзя.
+      - name: Ключ подписи
+        id: key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          FIREBASE_OK: ${{ steps.firebase.outputs.ok }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            if [ -n "$FIREBASE_OK" ]; then
+              echo "tasks=assembleRelease bundleRelease" >> "$GITHUB_OUTPUT"
+              echo "play=1" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::Для Google Play нужен ещё секрет GOOGLE_SERVICES_JSON (уведомления) — файл .aab не собран"
+              echo "tasks=assembleRelease" >> "$GITHUB_OUTPUT"
+            fi
+            echo "apk=android/app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
+            echo "name=AvtoVes-Voditel-apk" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Нет секрета ANDROID_KEYSTORE_B64 — собрана пробная версия с временным ключом"
+            echo "tasks=assembleDebug" >> "$GITHUB_OUTPUT"
+            echo "apk=android/app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
+            echo "name=AvtoVes-Voditel-PROBNAYA-apk" >> "$GITHUB_OUTPUT"
           fi
       - name: Сборка
         working-directory: android
         env:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           VERSION_CODE: ${{ github.run_number }}
-          TASK: ${{ steps.key.outputs.task }}
-        run: gradle --no-daemon "$TASK"
+          TASKS: ${{ steps.key.outputs.tasks }}
+        run: gradle --no-daemon $TASKS
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.key.outputs.name }}
           path: ${{ steps.key.outputs.apk }}
+      # Файл для Google Play Console: «Тестирование» / «Рабочая версия» → «Создать выпуск» → загрузить .aab
+      - uses: actions/upload-artifact@v4
+        if: steps.key.outputs.play == '1'
+        with:
+          name: AvtoVes-Voditel-GooglePlay-aab
+          path: android/app/build/outputs/bundle/release/app-release.aab

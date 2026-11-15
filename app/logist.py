@@ -696,6 +696,41 @@ def build_routes(ctx, public: bool) -> list[Route]:
     async def logist_page(_):
         return FileResponse(STATIC / "logist.html", headers={"Cache-Control": "no-cache"})
 
+    # ---- приложение водителя в Google Play: сведения о компании и политика конфиденциальности
+    def app_info() -> dict:
+        db.x("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        rows = db.q("SELECT value FROM kv WHERE key='app_info'")
+        out = {"company": "", "contact": ""}
+        if rows:
+            out.update(json.loads(rows[0]["value"]))
+        return out
+
+    async def privacy_page(_):
+        """Политика конфиденциальности для страницы приложения в Google Play (ссылка /privacy)."""
+        from html import escape
+        info = app_info()
+        company = escape(info["company"] or "Компания — владелец сервера АвтоВес")
+        contact = escape(info["contact"] or "через своего логиста или руководителя")
+        html = PRIVACY.replace("{company}", company).replace("{contact}", contact)
+        return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
+
+    @handler
+    async def appinfo_api(request: Request):
+        admin_of(request)
+        if request.method == "POST":
+            b = await body(request)
+            new = {"company": text(b.get("company"), "Название компании", 200, False),
+                   "contact": text(b.get("contact"), "Контакт", 200, False)}
+            app_info()
+            db.x("INSERT INTO kv(key, value) VALUES('app_info', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (json.dumps(new, ensure_ascii=False),))
+        if request.method == "GET":
+            app_info()
+        drivers = db.q("SELECT COUNT(*) AS n FROM drivers WHERE active=1 AND COALESCE(login,'')<>''")[0]["n"]
+        return JSONResponse({**app_info(), "push": pusher.ready(), "drivers": drivers,
+                             "push_drivers": db.q("SELECT COUNT(DISTINCT driver_id) AS n FROM push_tokens")[0]["n"],
+                             "host": request.headers.get("host", "")})
+
     @handler
     async def logist_status(_):
         # Первого логиста можно создать только из локальной сети весовой
@@ -1538,6 +1573,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/app/push-token", app_push_token, methods=["POST"]),
         Route("/api/app/photo/{path:path}", app_photo),
         Route("/logist", logist_page),
+        Route("/privacy", privacy_page),
+        Route("/api/logist/appinfo", appinfo_api, methods=["GET", "POST"]),
         Route("/api/logist/status", logist_status),
         Route("/api/logist/setup", logist_setup, methods=["POST"]),
         Route("/api/logist/login", logist_login, methods=["POST"]),
@@ -1569,3 +1606,38 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/invoices/{uid}/undo", invoice_mark_as("undo"), methods=["POST"]),
         Route("/api/logist/legs/{tid:int}/done", leg_done, methods=["POST"]),
     ]
+
+
+PRIVACY = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>АвтоВес Водитель — политика конфиденциальности</title>
+<style>body{margin:0;background:#f4f6f8;color:#15202b;font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:28px 18px 60px}h1{font-size:26px;line-height:1.25}h2{font-size:18px;margin-top:28px}
+li{margin:4px 0}</style></head><body><main>
+<h1>Политика конфиденциальности приложения «АвтоВес Водитель»</h1>
+<p>Приложение «АвтоВес Водитель» — рабочий инструмент водителей компании {company}. Оно работает только с сервером
+этой компании; учётную запись водителю выдаёт логист, самостоятельная регистрация не предусмотрена.</p>
+<h2>Какие данные обрабатываются</h2>
+<ul>
+<li>логин и имя водителя, которые завёл логист; пароль хранится на сервере только в зашифрованном (хешированном) виде;</li>
+<li>госномера тягача и полуприцепа, результаты взвешиваний на весах компании и фото машины с камер весовой;</li>
+<li>сведения о выгрузках: клиент, адрес, объём, время, отметка об оплате, комментарий водителя;</li>
+<li>заказы, которые логист назначил водителю;</li>
+<li>технический идентификатор устройства для уведомлений (токен Firebase Cloud Messaging).</li>
+</ul>
+<p>Приложение не запрашивает доступ к местоположению, контактам, камере, микрофону и файлам телефона.</p>
+<h2>Зачем</h2>
+<p>Для учёта рейсов, взвешиваний и выгрузок газа, расчёта сверки с весами, выставления счетов клиентам
+и отправки водителю уведомлений о новых заказах.</p>
+<h2>Где хранятся и кому передаются</h2>
+<p>Данные передаются по защищённому соединению (HTTPS) и хранятся на сервере компании {company}.
+Третьим лицам не продаются и не передаются, кроме сервиса Google Firebase Cloud Messaging, через который
+доставляются уведомления (передаётся только текст уведомления и токен устройства).
+При открытии маршрута приложение передаёт координаты точек доставки в приложение или на сайт Яндекс Карт.</p>
+<h2>Сколько хранятся</h2>
+<p>Записи о взвешиваниях и выгрузках хранятся, пока они нужны компании для учёта и отчётности.
+После выхода из приложения данные входа на телефоне удаляются.</p>
+<h2>Удаление данных и вопросы</h2>
+<p>Чтобы удалить учётную запись и связанные с ней данные или задать вопрос, обратитесь: {contact}.</p>
+</main></body></html>
+"""

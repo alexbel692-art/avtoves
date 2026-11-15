@@ -278,7 +278,7 @@ async function render() {
       : [['', [['home', 'Сводка'], ['notices', badge], ['map', 'Карта'], ['orders', 'Заказы']]],
         ['Учёт', [['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания']]],
         ['Справочники', [['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']]]]
-        .concat(me.admin ? [['Подключения', [['stavtrack', 'Ставтрэк'], ['routing', 'Маршруты']]]] : []);
+        .concat(me.admin ? [['Подключения', [['stavtrack', 'Ставтрэк'], ['routing', 'Маршруты'], ['driverapp', 'Приложение водителя']]]] : []);
     const tabs = groups.flatMap(([, items]) => items);
     if (!tabs.some(([id]) => id === tab)) tab = 'home';
     const title = tabs.find(([id]) => id === tab)[1].replace(/ \(\d+\)$/, '');
@@ -287,7 +287,7 @@ async function render() {
       el('nav', { 'aria-label': 'Разделы' }, groups.map(([name, items]) => [name ? el('div', { class: 'group' }, name) : null,
         items.map(([id, label]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, label))])),
       el('div', { class: 'who' }, el('div', null, me.name || me.login), el('button', { id: 'logout', onclick: () => { setToken(null); dashMonth = null; render(); } }, 'Выйти (' + me.login + ')')));
-    const body = await ({ home: renderHome, notices: renderNotices, map: renderMap, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting })[tab]();
+    const body = await ({ home: renderHome, notices: renderNotices, map: renderMap, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting, driverapp: renderDriverApp })[tab]();
     if (run !== renderCount) return;
     view.className = 'app';
     view.replaceChildren(head, el('main', { class: 'page' }, el('h1', null, title), body));
@@ -498,6 +498,28 @@ async function renderHome() {
       el('div', { class: 'card' }, el('h2', null, 'Клиенты'), hbars(d.clients, 'chart-clients', d.total.liters)),
       d.managers ? el('div', { class: 'card' }, el('h2', null, 'Менеджеры'), hbars(d.managers, 'chart-managers', d.total.liters)) : null,
       el('div', { class: 'card' }, el('h2', null, 'Водители'), hbars(d.drivers, 'chart-drivers', d.total.liters))));
+}
+
+// ----- приложение водителя (Google Play) -----
+async function renderDriverApp() {
+  const a = await api('/api/logist/appinfo');
+  const privacy = location.origin + '/privacy';
+  const edit = () => form('Сведения для Google Play', [
+    { name: 'company', label: 'Название компании', value: a.company },
+    { name: 'contact', label: 'Контакт для вопросов и удаления данных (почта или телефон)', value: a.contact },
+  ], 'Сохранить', async (v) => { await api('/api/logist/appinfo', 'POST', v); render(); });
+  const row = (k, v) => el('tr', null, el('th', null, k), el('td', null, v));
+  return el('div', null,
+    el('p', { class: 'note' }, 'Приложение водителя ставится из Google Play: обновления приходят сами, уведомления о заказах — через Google (Firebase).'),
+    el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'app-edit', onclick: edit }, 'Изменить сведения')),
+    el('div', { class: 'scroll' }, el('table', { id: 'app-info' }, el('tbody', null,
+      row('Адрес сервера для приложения', el('b', null, a.host)),
+      row('Политика конфиденциальности', el('a', { href: privacy, target: '_blank', rel: 'noopener' }, privacy)),
+      row('Компания', a.company || el('span', { class: 'bad' }, 'не указана')),
+      row('Контакт для удаления данных', a.contact || el('span', { class: 'bad' }, 'не указан')),
+      row('Уведомления через Google', a.push ? el('span', { class: 'good' }, 'включены (firebase.json на сервере)')
+        : el('span', { class: 'bad' }, 'выключены: положите ключ сервисного аккаунта Firebase в /var/lib/avtoves/data/firebase.json')),
+      row('Водители с включёнными уведомлениями', `${a.push_drivers} из ${a.drivers}`)))));
 }
 
 // ----- уведомления -----

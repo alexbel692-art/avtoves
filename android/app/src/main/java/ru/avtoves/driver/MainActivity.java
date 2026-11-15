@@ -9,6 +9,12 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.graphics.Color;
+import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -75,7 +81,43 @@ public class MainActivity extends Activity {
         settings.setDomStorageEnabled(true);
         webView.addJavascriptInterface(new Bridge(), "Android");
         setContentView(webView);
+        fitSystemBars();
+        if (Build.VERSION.SDK_INT >= 33) {
+            // Android 16 больше не вызывает onBackPressed: «Назад» приходит сюда
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, (OnBackInvokedCallback) this::goBack);
+        }
         webView.loadUrl("file:///android_asset/app.html");
+    }
+
+    /** С Android 15 окно занимает весь экран: отодвигаем страницу от строки состояния, жестов и клавиатуры. */
+    private void fitSystemBars() {
+        int steel = Color.rgb(0xDF, 0xE5, 0xEA);              // фон страницы приложения
+        getWindow().getDecorView().setBackgroundColor(steel);
+        webView.setBackgroundColor(steel);
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController bars = getWindow().getInsetsController();
+            if (bars != null) {                                // тёмные значки на светлом фоне
+                int light = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                bars.setSystemBarsAppearance(light, light);
+            }
+            webView.setOnApplyWindowInsetsListener((View v, WindowInsets insets) -> {
+                android.graphics.Insets i = insets.getInsets(WindowInsets.Type.systemBars()
+                        | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+                v.setPadding(i.left, i.top, i.right, i.bottom);
+                return WindowInsets.CONSUMED;
+            });
+        }
+    }
+
+    /** «Назад»: сначала закрывается открытый экран приложения, на главном — выход. */
+    private void goBack() {
+        webView.evaluateJavascript("window.avtovesBack && window.avtovesBack()", value -> {
+            if (!"true".equals(value)) {
+                finish();
+            }
+        });
     }
 
     private void setUpPush() {
@@ -96,11 +138,8 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    public void onBackPressed() {
-        webView.evaluateJavascript("window.avtovesBack && window.avtovesBack()", value -> {
-            if (!"true".equals(value)) {
-                finish();
-            }
-        });
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {           // Android 12 и старше
+        goBack();
     }
 }
