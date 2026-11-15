@@ -35,12 +35,27 @@ fi
 
 cat > /etc/nginx/conf.d/avtoves-limits.conf <<EOF
 limit_req_zone \$binary_remote_addr zone=avtoves_login:10m rate=20r/m;
+limit_req_zone \$binary_remote_addr zone=avtoves_all:10m rate=20r/s;
+server_tokens off;
 EOF
+# Запросы не на наш домен (сканеры по голому IP) — сбрасываем без ответа
+cat > /etc/nginx/sites-available/avtoves-default <<EOF
+server {
+    listen 80 default_server;
+    server_name _;
+    return 444;
+}
+EOF
+ln -sf /etc/nginx/sites-available/avtoves-default /etc/nginx/sites-enabled/avtoves-default
 cat > /etc/nginx/sites-available/avtoves <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
     client_max_body_size 1m;
+    limit_req zone=avtoves_all burst=60 nodelay;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 
     location ~ ^/api/(app|logist)/login\$ {
         limit_req zone=avtoves_login burst=10 nodelay;
@@ -62,7 +77,11 @@ ln -sf /etc/nginx/sites-available/avtoves /etc/nginx/sites-enabled/avtoves
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl reload nginx
-certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect
+# Сертификат Let's Encrypt (продлевается сам), переход на HTTPS и HSTS: браузер больше не откроет сайт по HTTP
+certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect --hsts
+systemctl enable --now certbot.timer 2>/dev/null || true
+certbot renew --dry-run >/dev/null 2>&1 && echo "Автопродление сертификата проверено" \
+  || echo "Внимание: проверка автопродления не прошла — смотрите: sudo certbot renew --dry-run" >&2
 
 echo
 echo "Готово. Кабинет логиста: https://$DOMAIN/logist"

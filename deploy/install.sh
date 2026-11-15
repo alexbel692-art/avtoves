@@ -80,6 +80,12 @@ fi
 if [ -n "$DOMAIN" ]; then
   bash "$SRC/deploy/proxy.sh" "$DOMAIN" "127.0.0.1:8790"
 fi
+# Брандмауэр: снаружи только 80/443; отключить установку брандмауэра: NO_FIREWALL=1
+if [ "${NO_FIREWALL:-}" != "1" ]; then
+  bash "$SRC/deploy/firewall.sh"
+fi
+# Автоматические обновления безопасности Ubuntu
+apt-get install -y unattended-upgrades >/dev/null && dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null || true
 
 IP="$(hostname -I | awk '{print $1}')"
 echo

@@ -370,7 +370,7 @@ function short(v) {
 }
 const liters = (v) => fmt(Math.round(v)) + ' л';
 function niceMax(v) {
-  if (v <= 0) return 1;
+  if (v <= 0) return 1000;           // продаж нет — шкала 0…1000 л, а не дробные деления
   const p = Math.pow(10, Math.floor(Math.log10(v)));
   return [1, 2, 3, 4, 5, 8, 10].map((m) => m * p).find((m) => m >= v);
 }
