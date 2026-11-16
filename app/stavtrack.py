@@ -21,7 +21,11 @@ from datetime import datetime, timezone
 log = logging.getLogger("stavtrack")
 
 DEFAULTS = {"enabled": False, "url": "https://wiafleet.online/api", "email": "", "password": "",
-            "fuel_density": 0.84, "max_age_min": 15}
+            "fuel_density": 0.84, "max_age_min": 15,
+            # литров топлива, которые уже есть в таре ТС из справочника (0 — тара без топлива)
+            "fuel_in_tare_l": 0,
+            # по каким словам в названии датчика узнать показания СУГ в цистерне
+            "lpg_words": "СУГ, ППМ, газ, жидк, продукт, уровень, плотн"}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS st_links (plate TEXT PRIMARY KEY, device_id INTEGER NOT NULL);
@@ -31,7 +35,8 @@ CREATE TABLE IF NOT EXISTS weigh_fuel (
     liters    REAL,            -- NULL: показание получить не удалось
     pos_time  TEXT,            -- время данных трекера (UTC)
     age_s     INTEGER,
-    note      TEXT NOT NULL DEFAULT ''
+    note      TEXT NOT NULL DEFAULT '',
+    lpg       TEXT NOT NULL DEFAULT ''   -- показания датчиков СУГ (JSON)
 );
 """
 LOOKALIKE = str.maketrans("ABEKMHOPCTYX", "АВЕКМНОРСТУХ")
@@ -65,6 +70,9 @@ class Stavtrack:
         self.db = db
         with db.lock:
             db.conn.executescript(SCHEMA)
+            cols = {r[1] for r in db.conn.execute("PRAGMA table_info(weigh_fuel)")}
+            if "lpg" not in cols:
+                db.conn.execute("ALTER TABLE weigh_fuel ADD COLUMN lpg TEXT NOT NULL DEFAULT ''")
             db.conn.commit()
         self.lock = threading.Lock()
         self.token = None
@@ -265,6 +273,23 @@ class Stavtrack:
             out["note"] = "данные трекера устарели" if age is not None else "неизвестно время данных трекера"
         return out
 
+    # ---- показания датчиков СУГ (уровень, объём, масса в цистерне) машины и её бочки
+    def lpg_readings(self, plate: str, trailer: str = "") -> list[dict]:
+        words = [w.strip().lower() for w in str(self.settings().get("lpg_words") or "").split(",") if w.strip()]
+        out = []
+        for who, number in (("машина", plate), ("прицеп", trailer)):
+            dev = self.device_for(number) if number else None
+            if not dev:
+                continue
+            pos = self.call("/positions", {"deviceIds": dev["id"]}) or []
+            pos = next((p for p in pos if p.get("deviceId") == dev["id"]), None)
+            for r in self.readings(dev["id"], pos):
+                if r["type"] in ("fuel", "ignition", "voltage", "odometer", "driver_assignment"):
+                    continue
+                if any(w in r["name"].lower() for w in words):
+                    out.append({**r, "src": who})
+        return out
+
     # ---- вызывается после каждого взвешивания
     def on_weighing(self, weighing_id: int, plate: str):
         if not plate or not self.ready():
@@ -278,8 +303,18 @@ class Stavtrack:
             except Exception:  # noqa: BLE001 — весовая не должна зависеть от Ставтрэка
                 log.exception("Ошибка запроса ДУТ")
                 return
+            w = self.db.q("SELECT trailer, trip_id FROM weighings WHERE id=?", (weighing_id,))
+            trailer, trip_id = (w[0]["trailer"] or "", w[0]["trip_id"]) if w else ("", None)
+            try:
+                lpg = self.lpg_readings(plate, trailer)
+            except Exception:  # noqa: BLE001
+                log.exception("Ошибка запроса датчиков СУГ")
+                lpg = []
             usable = f["liters"] if not f["note"] else None      # устаревшее показание в расчёт не идёт
             note = f["note"] + (f" ({f['liters']} л)" if f["note"] and f["liters"] is not None else "")
-            self.db.x("INSERT OR REPLACE INTO weigh_fuel(weighing_id, plate, liters, pos_time, age_s, note) "
-                      "VALUES(?,?,?,?,?,?)", (weighing_id, plate, usable, f["pos_time"], f["age_s"], note))
+            self.db.x("INSERT OR REPLACE INTO weigh_fuel(weighing_id, plate, liters, pos_time, age_s, note, lpg) "
+                      "VALUES(?,?,?,?,?,?,?)", (weighing_id, plate, usable, f["pos_time"], f["age_s"], note,
+                                                json.dumps(lpg, ensure_ascii=False)))
+            if trip_id and usable is not None:
+                self.db.recalc_gas(trip_id)          # газ по весам — за вычетом топлива в баках
         threading.Thread(target=work, name="stavtrack", daemon=True).start()

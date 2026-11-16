@@ -702,11 +702,13 @@ async function renderWeighings() {
       el('label', null, 'С даты', el('input', { type: 'date', value: weighFilter.from, onchange: set('from') })),
       el('label', null, 'По дату', el('input', { type: 'date', value: weighFilter.to, onchange: set('to') }))),
     rows.length ? el('div', { class: 'scroll' }, el('table', { id: 'weighings' },
-      el('thead', null, el('tr', null, ['Время', 'Машина', 'Что', 'Водитель'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Вес, кг'), el('th', { class: 'num' }, 'Топливо по ДУТ, л'), el('th', null, 'Фото'))),
+      el('thead', null, el('tr', null, ['Время', 'Машина', 'Что', 'Водитель'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Вес, кг'), el('th', { class: 'num' }, 'Топливо по ДУТ, л'), el('th', { class: 'num' }, 'Газ по весам'), el('th', null, 'Датчики СУГ'), el('th', null, 'Фото'))),
       el('tbody', null, rows.map((w) => el('tr', null, el('td', null, when(w.ts)), el('td', null, w.plate + (w.trailer ? ' + ' + w.trailer : '')),
         el('td', null, { arrival: 'Приехал на базу', departure: 'Уехал с базы' }[w.kind] || 'Взвешивание'), el('td', null, w.driver || (w.source === 'driver' ? '' : 'оператор')),
         el('td', { class: 'num' }, fmt(w.weight)),
         el('td', { class: 'num' }, w.fuel !== null && w.fuel !== undefined ? fmt(w.fuel) : el('small', null, w.fuel_note)),
+        el('td', { class: 'num gas-cell' }, w.gas ? [fmt(w.gas.l) + ' л', el('br'), el('small', null, fmt(w.gas.kg) + ' кг' + (w.gas.fuel_counted ? ', без топлива' : ', топливо не учтено'))] : el('small', null, 'нет тары')),
+        el('td', { class: 'lpg-cell' }, w.lpg.length ? w.lpg.map((x, i) => [i ? el('br') : null, (x.src === 'прицеп' ? 'Бочка: ' : '') + x.name + ': ', el('b', null, sensorValue(x))]) : el('small', null, '—')),
         el('td', null, w.photos.length ? el('button', { onclick: () => showPhotos(w) }, 'Смотреть (' + w.photos.length + ')') : el('span', { class: 'bad' }, 'нет фото')))))))
       : el('p', { class: 'empty' }, 'За эти дни взвешиваний нет.'));
 }
@@ -901,6 +903,8 @@ async function renderStavtrack() {
     { name: 'email', label: 'Логин (почта) в Ставтрэке', value: s.email },
     { name: 'password', label: s.password_set ? 'Пароль (пусто — не менять)' : 'Пароль', type: 'password' },
     { name: 'fuel_density', label: 'Плотность топлива, кг/л', value: s.fuel_density, inputmode: 'decimal' },
+    { name: 'fuel_in_tare_l', label: 'Сколько литров топлива уже входит в тару машин (0 — тара без топлива)', value: s.fuel_in_tare_l, inputmode: 'decimal' },
+    { name: 'lpg_words', label: 'Датчики СУГ: слова в названии через запятую', value: s.lpg_words },
     { name: 'max_age_min', label: 'Не учитывать данные трекера старше, минут', value: s.max_age_min, inputmode: 'numeric' },
   ], 'Сохранить', async (v) => { await api('/api/logist/stavtrack', 'POST', { ...v, enabled: v.enabled === '1' }); stCheck = null; });
   const check = async () => {

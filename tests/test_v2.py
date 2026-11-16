@@ -690,9 +690,21 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     q = f"?from={t0:%Y-%m-%d}&to={datetime.now():%Y-%m-%d}"
     [leg] = call(public, "/api/logist/legs" + q, token=logist)[1]
     assert (leg["fuel_out"], leg["fuel_in"], leg["fuel_fix_l"]) == (400.0, 300.0, 156)
-    assert (leg["out_l"], leg["in_l"], leg["scale_l"], leg["diff_l"], leg["status"]) == (25000, 689, 24155, 155, "ok")
+    # Газ при каждом взвешивании — за вычетом топлива в баках (в таре топлива нет): 400 л × 0,84 = 336 кг
+    assert (leg["out_l"], leg["in_l"], leg["scale_l"], leg["diff_l"], leg["status"]) == (24378, 222, 24156, 156, "ok")
     ws = call(public, "/api/logist/weighings" + q, token=logist)[1]
     assert [w["fuel"] for w in ws] == [300.0, 400.0, 400.0]
+    assert [w["gas"] for w in ws] == [{"kg": 120.0, "l": 222, "fuel_counted": True},
+                                      {"kg": 13164.0, "l": 24378, "fuel_counted": True},
+                                      {"kg": -336.0, "l": -622, "fuel_counted": True}]   # тара здесь взвешена с баком
+    # Датчики СУГ машины и её бочки записаны при каждом взвешивании
+    assert ws[0]["lpg"] == [{"name": "Уровень ППМ", "type": "arbitrary", "value": 63.46, "unit": "%", "src": "прицеп"},
+                            {"name": "Плотность", "type": "arbitrary", "value": None, "unit": "", "src": "прицеп"}]
+    # В тару входит 400 л топлива: газ пересчитывается, сверка та же
+    call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "", "fuel_in_tare_l": "400"}, logist)
+    [leg] = call(public, "/api/logist/legs" + q, token=logist)[1]
+    assert (leg["out_l"], leg["in_l"], leg["scale_l"], leg["diff_l"], leg["status"]) == (25000, 844, 24156, 156, "ok")
+    call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "", "fuel_in_tare_l": "0"}, logist)
 
     # Карта: машина, её водитель, прицеп, заказы и топливо
     today_l = 24000.0 if (t0 + timedelta(hours=2)).date() == datetime.now().date() else 0      # прогон сразу после полуночи

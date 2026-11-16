@@ -328,10 +328,10 @@ def legs(db, density: float, tol_pct: float, tol_l: float, date_from: str | None
                 leg["scale_l"] = leg["out_l"] - leg["in_l"]
                 leg["fuel_in"] = fuel_at(nxt.get("w1_id"))
                 if leg["fuel_out"] is not None and leg["fuel_in"] is not None:
-                    # Сожжённое в рейсе топливо весы видят как «уехавший газ»: убираем его
+                    # Топливо уже вычтено из газа при каждом взвешивании (db.recalc_gas);
+                    # здесь — сколько литров газа «съело» бы сожжённое топливо без этой поправки
                     burned_kg = (leg["fuel_out"] - leg["fuel_in"]) * fuel_density
                     leg["fuel_fix_l"] = round(burned_kg / density)
-                    leg["scale_l"] -= leg["fuel_fix_l"]
                 leg["diff_l"] = round(leg["scale_l"] - by_driver)
                 leg["diff_pct"] = round(leg["diff_l"] / leg["scale_l"] * 100, 1) if leg["scale_l"] > 0 else None
                 limit = max(tol_l, abs(leg["scale_l"]) * tol_pct / 100)
@@ -1343,7 +1343,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
             new["url"] = url
             if b.get("password"):
                 new["password"] = text(b["password"], "Пароль", 200)
-            for key, lo, hi in (("fuel_density", 0.6, 1.0), ("max_age_min", 1, 1440)):
+            for key, lo, hi in (("fuel_density", 0.6, 1.0), ("max_age_min", 1, 1440), ("fuel_in_tare_l", 0, 3000)):
+                if key == "fuel_in_tare_l" and b.get(key) in (None, ""):
+                    continue
                 try:
                     val = float(str(b.get(key)).replace(",", "."))
                 except ValueError as exc:
@@ -1351,7 +1353,12 @@ def build_routes(ctx, public: bool) -> list[Route]:
                 if not lo <= val <= hi:
                     raise Bad(f"Значение должно быть от {lo} до {hi}")
                 new[key] = val
+            if "lpg_words" in b:
+                new["lpg_words"] = text(b.get("lpg_words"), "Слова датчиков СУГ", 300, False)
             stv.save(new)
+            if "fuel_in_tare_l" in new:            # пересчитать газ в рейсах с учтённым топливом
+                for t in db.q("SELECT id FROM trips WHERE fuel1_l IS NOT NULL OR fuel2_l IS NOT NULL"):
+                    db.recalc_gas(t["id"])
         s_ = stv.settings()
         return JSONResponse({k: v for k, v in s_.items() if k != "password"} | {"password_set": bool(s_["password"])})
 
@@ -1514,13 +1521,29 @@ def build_routes(ctx, public: bool) -> list[Route]:
         logist_of(request)
         start, end = period(request)
         tok = bearer(request)
-        rows = db.q("SELECT w.*, d.name AS driver, f.liters AS fuel, f.note AS fuel_note FROM weighings w "
+        rows = db.q("SELECT w.*, d.name AS driver, f.liters AS fuel, f.note AS fuel_note, f.lpg AS lpg, "
+                    "t.w1_id, t.w2_id, t.gas_in, t.gas_out, t.fuel1_l, t.fuel2_l FROM weighings w "
                     "LEFT JOIN drivers d ON d.id=w.driver_id LEFT JOIN weigh_fuel f ON f.weighing_id=w.id "
+                    "LEFT JOIN trips t ON t.id=w.trip_id "
                     "WHERE w.ts>=? AND w.ts<=? ORDER BY w.id DESC LIMIT 500", (start, end + "T23:59:59"))
+        dens = density()
+
+        def gas_of(w):
+            """Газ в цистерне по весам при этом взвешивании (за вычетом тары и топлива по ДУТ)."""
+            if w.get("w1_id") == w["id"]:
+                kg, fuel_used = w.get("gas_in"), w.get("fuel1_l")
+            elif w.get("w2_id") == w["id"]:
+                kg, fuel_used = w.get("gas_out"), w.get("fuel2_l")
+            else:
+                return None
+            if kg is None:
+                return None
+            return {"kg": kg, "l": round(kg / dens), "fuel_counted": fuel_used is not None}
         return JSONResponse([{
             "id": w["id"], "ts": w["ts"], "plate": w["plate"], "trailer": w.get("trailer") or "", "weight": w["weight"],
             "kind": w.get("kind") or "", "source": w.get("source") or "", "driver": w.get("driver") or "",
             "fuel": w.get("fuel"), "fuel_note": w.get("fuel_note") or "",
+            "gas": gas_of(w), "lpg": json.loads(w["lpg"]) if w.get("lpg") else [],
             "photos": [f"/api/logist/photo/{x}?t={tok}" for x in (w["snapshots"] or "").split(";") if x],
         } for w in rows])
 

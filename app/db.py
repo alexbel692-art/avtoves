@@ -67,7 +67,9 @@ CREATE TABLE IF NOT EXISTS drivers (
 # Колонки, добавленные после первой версии (старые базы дополняются при запуске)
 MIGRATIONS = {
     "trips": {"gas_tare": "REAL", "gas_in": "REAL", "gas_out": "REAL", "driver_id": "INTEGER",
-              "trailer": "TEXT NOT NULL DEFAULT ''"},
+              "trailer": "TEXT NOT NULL DEFAULT ''",
+              # топливо в баках по ДУТ, вычтенное из газа при въезде/выезде (л); NULL — не учтено
+              "fuel1_l": "REAL", "fuel2_l": "REAL"},
     # source: auto / operator / driver;  kind: arrival (приехал) / departure (уехал) / ''
     "weighings": {"source": "TEXT NOT NULL DEFAULT ''", "kind": "TEXT NOT NULL DEFAULT ''",
                   "driver_id": "INTEGER", "plate_seen": "TEXT NOT NULL DEFAULT ''",
@@ -165,9 +167,31 @@ class DB:
         if not tare:
             self.x("UPDATE trips SET gas_tare=NULL,gas_in=NULL,gas_out=NULL WHERE id=?", (tid,))
             return
-        g_in = round(t["w1"] - tare, 1) if t["w1"] is not None else None
-        g_out = round(t["w2"] - tare, 1) if t["w2"] is not None else None
-        self.x("UPDATE trips SET gas_tare=?,gas_in=?,gas_out=? WHERE id=?", (tare, g_in, g_out, tid))
+        # Топливо в баках по ДУТ (Ставтрэк) тоже весит: убираем его из газа.
+        # В таре считается fuel_in_tare_l литров топлива (настройка Ставтрэка, по умолчанию 0).
+        f1, f2 = self.fuel_at(t.get("w1_id")), self.fuel_at(t.get("w2_id"))
+        dens, in_tare = self.fuel_settings()
+        fix = lambda f: (f - in_tare) * dens if f is not None else 0.0  # noqa: E731
+        g_in = round(t["w1"] - tare - fix(f1), 1) if t["w1"] is not None else None
+        g_out = round(t["w2"] - tare - fix(f2), 1) if t["w2"] is not None else None
+        self.x("UPDATE trips SET gas_tare=?,gas_in=?,gas_out=?,fuel1_l=?,fuel2_l=? WHERE id=?",
+               (tare, g_in, g_out, f1, f2, tid))
+
+    def fuel_at(self, weighing_id) -> float | None:
+        """Литры топлива в баках по ДУТ в момент взвешивания (если Ставтрэк подключён и показание свежее)."""
+        if weighing_id is None or not self.q("SELECT 1 FROM sqlite_master WHERE name='weigh_fuel'"):
+            return None
+        row = self.q("SELECT liters FROM weigh_fuel WHERE weighing_id=?", (weighing_id,))
+        return row[0]["liters"] if row else None
+
+    def fuel_settings(self) -> tuple[float, float]:
+        """(плотность топлива кг/л, литров топлива, учтённых в таре)."""
+        import json as _json
+        if not self.q("SELECT 1 FROM sqlite_master WHERE name='kv'"):
+            return 0.84, 0.0
+        row = self.q("SELECT value FROM kv WHERE key='stavtrack'")
+        st = _json.loads(row[0]["value"]) if row else {}
+        return float(st.get("fuel_density") or 0.84), float(st.get("fuel_in_tare_l") or 0)
 
     def combo_tare(self, plate: str, trailer: str = "") -> float | None:
         """Тара пустой сцепки: машина (тягач) + прицеп. Нет тары хоть одного — газ не считается."""
