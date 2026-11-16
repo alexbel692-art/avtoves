@@ -16,6 +16,8 @@ import re
 import secrets
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -346,6 +348,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
     init_db(db)
     tokens = Tokens(ctx.cfg["data_dir"])
     snap_dir = Path(ctx.cfg["data_dir"]) / "snapshots"
+    tile_dir = Path(ctx.cfg["data_dir"]) / "tiles"
     pusher = getattr(ctx, "pusher", None) or Pusher(ctx.cfg["data_dir"])
     if getattr(ctx, "stavtrack", None) is None:
         ctx.stavtrack = Stavtrack(db)
@@ -1547,6 +1550,50 @@ def build_routes(ctx, public: bool) -> list[Route]:
             "photos": [f"/api/logist/photo/{x}?t={tok}" for x in (w["snapshots"] or "").split(";") if x],
         } for w in rows])
 
+    # ---- карта OpenStreetMap через сервер: плитка скачивается один раз и раздаётся из кэша.
+    # Браузеры пользователей к OpenStreetMap не ходят, поэтому их блокировки (старый Chrome, общий адрес) не мешают.
+    tile_locks: dict[str, asyncio.Lock] = {}
+
+    @handler
+    async def map_tile(request: Request):
+        staff(request, request.query_params.get("t", ""))
+        try:
+            z, x, y = (int(request.path_params[k]) for k in ("z", "x", "y"))
+        except ValueError as exc:
+            raise Bad("Не найдено", 404) from exc
+        if not (0 <= z <= 19 and 0 <= x < 2 ** z and 0 <= y < 2 ** z):
+            raise Bad("Не найдено", 404)
+        f = tile_dir / str(z) / str(x) / f"{y}.png"
+        fresh = 14 * 86400                              # OpenStreetMap просит хранить плитки хотя бы неделю
+        headers = {"Cache-Control": "private, max-age=604800"}
+        if f.is_file() and time.time() - f.stat().st_mtime < fresh:
+            return FileResponse(f, media_type="image/png", headers=headers)
+        key = f"{z}/{x}/{y}"
+        lock = tile_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if not (f.is_file() and time.time() - f.stat().st_mtime < fresh):
+                url = getattr(ctx, "tile_url", "https://tile.openstreetmap.org/{z}/{x}/{y}.png").format(z=z, x=x, y=y)
+                host = request.headers.get("host", "")
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": f"AvtoVes/{__version__} (+https://{host}/privacy)",
+                    "Referer": f"https://{host}/"})
+
+                def fetch():
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        return resp.read()
+                try:
+                    png = await asyncio.get_running_loop().run_in_executor(None, fetch)
+                except (urllib.error.URLError, TimeoutError, OSError):
+                    if f.is_file():                      # нет связи — отдаём старую плитку
+                        return FileResponse(f, media_type="image/png", headers=headers)
+                    raise Bad("Карта сейчас недоступна", 502)
+                f.parent.mkdir(parents=True, exist_ok=True)
+                tmp = f.with_suffix(".tmp")
+                tmp.write_bytes(png)
+                tmp.replace(f)
+        tile_locks.pop(key, None)
+        return FileResponse(f, media_type="image/png", headers=headers)
+
     @handler
     async def logist_photo(request: Request):
         u = staff(request, request.query_params.get("t", ""))
@@ -1623,6 +1670,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/stavtrack/check", stavtrack_check),
         Route("/api/logist/stavtrack/import", stavtrack_import, methods=["GET", "POST"]),
         Route("/api/logist/dashboard", dashboard),
+        Route("/api/logist/tiles/{z}/{x}/{y}.png", map_tile),
         Route("/api/logist/stavtrack/link", stavtrack_link, methods=["POST"]),
         Route("/api/logist/photo/{path:path}", logist_photo),
         Route("/api/logist/invoices/{uid}/done", invoice_mark_as("done"), methods=["POST"]),

@@ -766,18 +766,58 @@ def test_map_in_browser(env):
     call(public, "/api/logist/stavtrack", "POST", {"enabled": True, "url": fake.url, "email": "ves@example.ru", "password": "st-parol", "fuel_density": 0.84, "max_age_min": 15}, logist)
     weigh(ctx, public, token, "arrival", 15000, datetime.now() - timedelta(hours=2))
     call(public, "/api/logist/orders", "POST", {"client_id": 1, "liters": 5000, "driver_id": 1, "day": f"{datetime.now():%Y-%m-%d}", "address": "с. Южное"}, logist)
+
+    # Вместо серверов OpenStreetMap — свой: плитки карты сервер АвтоВес берёт сам и хранит у себя
+    import base64
+    import http.server
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    seen = []
+
+    class Tiles(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("User-Agent")))
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.end_headers()
+            self.wfile.write(png)
+
+        def log_message(self, *a):
+            pass
+    tiles = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Tiles)
+    threading.Thread(target=tiles.serve_forever, daemon=True).start()
+    ctx.tile_url = f"http://127.0.0.1:{tiles.server_port}/{{z}}/{{x}}/{{y}}.png"
+    import urllib.request
+    import urllib.error
+    try:
+        urllib.request.urlopen(public + "/api/logist/tiles/7/80/45.png")
+        raise AssertionError("без входа плитки не отдаются")
+    except urllib.error.HTTPError as ex:
+        assert ex.code == 401
+    for _ in range(2):
+        body = urllib.request.urlopen(public + f"/api/logist/tiles/7/80/45.png?t={logist}").read()
+        assert body == png
+    assert len(seen) == 1 and seen[0][0] == "/7/80/45.png" and seen[0][1].startswith("AvtoVes/")   # второй раз — из кэша
+    for bad in ("/api/logist/tiles/7/200/45.png", "/api/logist/tiles/25/1/1.png"):
+        try:
+            urllib.request.urlopen(public + bad + f"?t={logist}")
+            raise AssertionError(bad)
+        except urllib.error.HTTPError as ex:
+            assert ex.code == 404
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
-        page.route("https://tile.openstreetmap.org/**", lambda route: route.abort())
+        osm_direct = []
+        page.route("https://tile.openstreetmap.org/**", lambda route: (osm_direct.append(route.request.url), route.abort()))
         page.goto(public + "/logist")
         page.fill("#l-login", "olga")
         page.fill("#l-pass", "parol-logista")
         page.click("#l-enter")
         page.click("nav [data-tab=map]")
         expect(page.locator(".car-mark")).to_have_count(1)
+        expect(page.locator("img.leaflet-tile-loaded").first).to_be_visible()
+        assert osm_direct == [] and len(seen) > 1          # браузер к OpenStreetMap не ходит
         page.click("#fleet button:has-text('Т100АА26')")
         popup = page.locator(".leaflet-popup-content")
         expect(popup).to_contain_text("Иванов Сергей")
