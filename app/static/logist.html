@@ -759,7 +759,7 @@ const kits = {
     create() {
       const obj = L.map('map', { fadeAnimation: false, markerZoomAnimation: false }).setView([45.04, 41.97], 7);
       obj.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');      // без флажка в подписи
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; участники OpenStreetMap' }).addTo(obj);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: '&copy; участники OpenStreetMap' }).addTo(obj);
       return obj;
     },
     clear(m) { m.marks.forEach((x) => x.mark.remove()); },

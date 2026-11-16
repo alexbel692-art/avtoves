@@ -706,7 +706,7 @@ def build_public_app(ctx) -> Starlette:
         resp = await call_next(request)
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["X-Frame-Options"] = "DENY"
-        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"   # карты требуют адрес сайта
         return resp
 
     from starlette.middleware.base import BaseHTTPMiddleware

@@ -61,7 +61,7 @@ server {
     client_max_body_size 1m;
     limit_req zone=avtoves_all burst=60 nodelay;
     add_header X-Content-Type-Options nosniff always;
-    add_header Referrer-Policy no-referrer always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 
     location ~ ^/api/(app|logist)/login\$ {
