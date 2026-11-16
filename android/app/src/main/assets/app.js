@@ -64,10 +64,65 @@ function localDate(moment) {
 function fmt(value) {
   return Number(value).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
 }
+const ICONS = {
+  trip: 'M3 15V8h11v7M14 10h4l3 3v2h-7M6.5 18.5a1.8 1.8 0 1 0 0-.1M16.5 18.5a1.8 1.8 0 1 0 0-.1M8.5 17h6',
+  scale: 'M4 19h16M6.5 19 8 12h8l1.5 7M12 12V6M8.5 6h7',
+  day: 'M5 5h14v15H5zM5 9h14M9 3v4M15 3v4M8.5 13h3M8.5 16.5h6',
+  route: 'M4 11 20 4l-7 16-2-7z',
+  back: 'M15 5l-7 7 7 7',
+  check: 'M5 12.5 10 17 19 7',
+  drop: 'M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z',
+  swap: 'M7 7h11l-3-3M17 17H6l3 3',
+};
+function icon(name) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', 'i');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', ICONS[name]);
+  svg.append(path);
+  return svg;
+}
+function stateLine() {
+  const unsent = data.queue.length;
+  const text = unsent ? `Не отправлено записей: ${unsent}. Отправятся, когда появится связь.`
+    : (online ? 'Все записи отправлены' : 'Нет связи. Выгрузки сохранятся в телефоне.');
+  return el('div', { class: 'state' + (unsent ? ' wait' : (online ? '' : ' off')), id: 'state' }, text);
+}
+function rigButton() {
+  const missing = !data.plate ? 'Выбрать машину' : (needsTrailer() && !data.trailer ? 'Выбрать прицеп' : '');
+  return el('button', { class: 'rig', id: 'change-vehicle', 'aria-label': 'Сменить машину или прицеп', onclick: () => { screen = 'vehicle'; render(); } },
+    data.plate ? el('div', { class: 'plates' }, plate(data.plate), data.trailer ? plate(data.trailer) : null) : null,
+    missing ? el('span', { class: 'none', id: data.plate ? 'no-trailer-hint' : 'no-vehicle' }, missing) : el('span', { class: 'change' }, icon('swap'), 'Сменить'));
+}
+function topBar(back) {
+  if (back) {
+    return el('div', { class: 'top' },
+      el('button', { class: 'back', id: 'back', onclick: back }, icon('back'), 'Назад'),
+      el('div', { class: 'who' }), data.plate ? el('div', { class: 'plates' }, plate(data.plate), data.trailer ? plate(data.trailer) : null) : null);
+  }
+  return [el('div', { class: 'top' }, el('div', { class: 'who' }, el('b', null, session.driver.name), stateLine())),
+    el('div', { class: 'rig-wrap' }, rigButton())];
+}
+function tabs(active) {
+  const tab = (id, name, label, go) => el('button', { id, 'aria-current': active === name || (active === 'weigh' && name === 'scale') || (active === 'main' && name === 'trip') ? 'page' : null, onclick: go }, icon(name), label);
+  return el('nav', { class: 'tabs', 'aria-label': 'Разделы' }, el('div', null,
+    tab('tab-main', 'trip', 'Рейс', () => { screen = 'main'; render(); }),
+    tab('go-weigh', 'scale', 'Весы', () => { if (vehicleReady()) { weighResult = null; screen = 'weigh'; render(); } }),
+    tab('tab-day', 'day', 'День', () => { selectedDate = localDate(); screen = 'day'; render(); })));
+}
+function dock(solo, ...children) {
+  return el('div', { class: 'dock' + (solo ? ' solo' : '') }, el('div', { style: 'width:100%' }, children));
+}
+function page(cls, ...children) {
+  return el('div', { class: 'page ' + (cls || '') }, children);
+}
 function plate(number) {
   return el('div', { class: 'plate' }, el('span', null, number), el('i', null, 'RUS'));
 }
 function toast(text) {
+  document.querySelectorAll('.toast').forEach((t) => t.remove());
   const node = el('div', { class: 'toast', role: 'status' }, text);
   document.body.append(node);
   setTimeout(() => node.remove(), 2600);
@@ -200,7 +255,7 @@ async function sync(quiet) {
   }
   syncing = false;
   if (quiet) updateLive();
-  else if (screen === 'main' || screen === 'vehicle' || (screen === 'weigh' && !weighBusy && !weighResult)) render();
+  else if (screen === 'main' || screen === 'day' || screen === 'vehicle' || (screen === 'weigh' && !weighBusy && !weighResult)) render();
 }
 
 function enqueue(op) {
@@ -240,6 +295,7 @@ function render() {
   if (!session) { renderLogin(); return; }
   if (screen === 'vehicle') renderVehicle();
   else if (screen === 'weigh') renderWeigh();
+  else if (screen === 'day') renderDay();
   else if (screen === 'unload') renderUnloadForm();
   else renderMain();
 }
@@ -279,21 +335,17 @@ function renderLogin() {
       }
     },
   },
-  el('label', { for: 'server' }, 'Адрес сервера'), server,
+  el('label', { for: 'server' }, 'Адрес сервера компании'), server,
   el('label', { for: 'login' }, 'Логин'), login,
   el('label', { for: 'password' }, 'Пароль'), password,
-  el('p', null), submit, error);
-  show(el('h1', null, 'АвтоВес Водитель'), form);
+  submit, error);
+  const logo = icon('trip');
+  show(el('div', { class: 'login' },
+    el('div', { class: 'brand' }, el('div', { class: 'logo' }, logo),
+      el('div', null, el('h1', null, 'АвтоВес Водитель'), el('p', null, 'Логин и пароль выдаёт логист'))),
+    form));
 }
 
-function vehicleBlock() {
-  return el('section', { class: 'hitch' },
-    data.plate ? el('div', { class: 'plates' }, plate(data.plate), data.trailer ? plate(data.trailer) : null)
-      : el('div', { class: 'none', id: 'no-vehicle' }, 'Машина не выбрана'),
-    data.plate && needsTrailer() && !data.trailer ? el('div', { class: 'none' }, 'Выберите прицеп') : null,
-    el('p', null),
-    el('button', { id: 'change-vehicle', onclick: () => { screen = 'vehicle'; render(); } }, data.plate ? 'Сменить машину или прицеп' : 'Выбрать машину'));
-}
 function vehicleReady() {
   if (!data.plate || (needsTrailer() && !data.trailer)) {
     screen = 'vehicle';
@@ -303,10 +355,41 @@ function vehicleReady() {
   return true;
 }
 
-function renderMain() {
-  const today = localDate();
-  const list = unloadsFor(selectedDate);
+function dayTotals(day) {
+  const list = unloadsFor(day);
   const total = list.reduce((sum, u) => sum + Math.round(u.liters * 100), 0) / 100;
+  return { list, total };
+}
+
+function renderMain() {
+  const left = leftInTank();
+  const tank = tankOf();
+  const orders = activeOrders();
+  const today = dayTotals(localDate());
+  show(
+    topBar(),
+    page('has-dock',
+      data.rejected.length ? el('div', { class: 'notice', id: 'rejected' },
+        el('b', null, 'Сервер не принял записи:'),
+        data.rejected.map((r) => el('p', null, describeOp(r.op) + ': ' + r.error)),
+        el('button', { class: 'small', onclick: () => { data.rejected = []; saveData(); render(); } }, 'Понятно')) : null,
+      left !== null ? el('section', { class: 'tank', id: 'left' },
+        el('div', { class: 'k' }, 'В цистерне по весам'),
+        el('div', { class: 'v' }, fmt(Math.max(left, 0)), el('small', null, 'л')),
+        tank ? [el('div', { class: 'gauge', role: 'img', 'aria-label': `Заполнено на ${Math.round(Math.max(0, Math.min(1, left / tank)) * 100)} %` },
+          el('div', { style: `width:${Math.max(0, Math.min(100, left / tank * 100))}%` })),
+          el('div', { class: 's' }, el('span', null, Math.round(Math.max(0, Math.min(1, left / tank)) * 100) + ' %'), el('span', null, 'объём ' + fmt(tank) + ' л'))] : null) : null,
+      el('button', { class: 'daystrip', onclick: () => { selectedDate = localDate(); screen = 'day'; render(); } },
+        el('span', null, 'Слито сегодня', el('small', null, 'выгрузок: ' + today.list.length)), el('b', null, el('span', { id: 'total' }, fmt(today.total)), ' л')),
+      orderList()),
+    dock(false, el('button', { class: orders.length ? '' : 'main', id: 'new-unload', onclick: () => { if (vehicleReady()) { orderForUnload = null; screen = 'unload'; render(); } } },
+      icon('drop'), orders.length ? 'Выгрузка без заказа' : 'Записать выгрузку')),
+    tabs('main'));
+}
+
+function renderDay() {
+  const today = localDate();
+  const { list, total } = dayTotals(selectedDate);
   const byClient = new Map();
   for (const u of list) {
     const entry = byClient.get(u.client) || { cl: 0, n: 0 };
@@ -314,54 +397,42 @@ function renderMain() {
     entry.n += 1;
     byClient.set(u.client, entry);
   }
-  const unsent = data.queue.length;
-  const stateText = unsent ? `Не отправлено записей: ${unsent}. Отправятся, когда появится связь.`
-    : (online ? 'Все записи отправлены' : 'Нет связи. Выгрузки сохранятся в телефоне.');
-  const left = leftInTank();
-
   show(
-    el('div', { class: 'bar' },
-      el('b', null, session.driver.name),
-      el('button', { class: 'small quiet', id: 'logout', onclick: logout }, 'Выйти')),
-    data.rejected.length ? el('div', { class: 'notice', id: 'rejected' },
-      el('b', null, 'Сервер не принял записи:'),
-      data.rejected.map((r) => el('p', null, describeOp(r.op) + ': ' + r.error)),
-      el('button', { class: 'small', onclick: () => { data.rejected = []; saveData(); render(); } }, 'Понятно')) : null,
-    el('div', { class: 'state' + (unsent || !online ? ' wait' : ''), id: 'state' }, stateText),
-    vehicleBlock(),
-    left !== null ? el('div', { class: 'info', id: 'left' }, 'В цистерне по весам: ', el('b', null, fmt(left) + ' л')) : null,
-    orderList(),
-    el('div', { class: 'twin' },
-      el('button', { id: 'go-weigh', onclick: () => { if (vehicleReady()) { weighResult = null; screen = 'weigh'; render(); } } }, 'Взвеситься'),
-      el('button', { class: activeOrders().length ? 'plain' : 'main', id: 'new-unload', onclick: () => { if (vehicleReady()) { orderForUnload = null; screen = 'unload'; render(); } } }, activeOrders().length ? 'Выгрузка без заказа' : 'Записать выгрузку')),
-    el('h2', null, selectedDate === today ? 'Слито сегодня' : 'Слито за день'),
-    el('input', {
-      type: 'date', id: 'day', value: selectedDate, max: today, 'aria-label': 'День',
-      onchange: (event) => { if (event.target.value) { selectedDate = event.target.value; render(); } },
-    }),
-    el('div', { class: 'sum' }, el('strong', { id: 'total' }, fmt(total)), el('span', null, 'л, выгрузок: ' + list.length)),
-    Array.from(byClient.entries()).sort((a, b) => b[1].cl - a[1].cl).map(([name, entry]) =>
-      el('div', { class: 'row point-row' }, el('span', null, name + ' (' + entry.n + ')'), el('b', null, fmt(entry.cl / 100) + ' л'))),
-    el('h2', null, 'Выгрузки'),
-    list.length ? list.map(renderUnload) : el('p', { class: 'empty' }, 'За этот день выгрузок нет.'),
-  );
+    topBar(),
+    page('',
+      el('input', {
+        type: 'date', id: 'day', value: selectedDate, max: today, 'aria-label': 'День',
+        onchange: (event) => { if (event.target.value) { selectedDate = event.target.value; render(); } },
+      }),
+      el('div', { class: 'sum' }, el('strong', { id: 'total' }, fmt(total)), el('span', null, 'л ' + (selectedDate === today ? 'слито сегодня' : 'слито за день') + ', выгрузок: ' + list.length)),
+      byClient.size ? el('div', { class: 'rows' }, Array.from(byClient.entries()).sort((a, b) => b[1].cl - a[1].cl).map(([name, entry]) =>
+        el('div', { class: 'row point-row' }, el('span', null, name + ' (' + entry.n + ')'), el('b', null, fmt(entry.cl / 100) + ' л')))) : null,
+      el('h2', null, 'Выгрузки'),
+      list.length ? list.map(renderUnload) : el('p', { class: 'empty' }, 'За этот день выгрузок нет.'),
+      el('h2', null, 'Учётная запись'),
+      el('button', { class: 'quiet', id: 'logout', onclick: logout }, 'Выйти из приложения')),
+    tabs('day'));
 }
 
 function orderList() {
   const orders = activeOrders();
-  if (!orders.length) return null;
+  if (!orders.length) {
+    return el('div', { class: 'empty-card' }, el('b', null, 'Заказов нет'), 'Когда логист назначит заказ, придёт уведомление.');
+  }
   const today = localDate();
   const onMap = orders.filter((o) => o.lat !== null && o.lat !== undefined);
   return el('section', { id: 'orders' }, el('h2', null, 'Заказы: ' + orders.length),
-    onMap.length > 1 ? el('button', { class: 'main small nav', id: 'route-all', onclick: () => openNavigator(onMap) }, `Весь маршрут в Яндекс Картах (${onMap.length} точ.)`) : null,
-    orders.map((o, i) => el('article', { class: 'trip order' },
-      el('div', { class: 'top' }, el('span', null, (i + 1) + '. ' + o.client), el('b', null, fmt(o.liters) + ' л')),
+    onMap.length > 1 ? el('button', { class: 'nav', id: 'route-all', onclick: () => openNavigator(onMap) }, icon('route'), `Весь маршрут в Яндекс Картах (${onMap.length} точ.)`) : null,
+    orders.map((o, i) => el('article', { class: 'order' + (i === 0 ? ' first' : '') },
+      el('div', { class: 'num' }, i === 0 ? 'Следующий' : (i + 1) + '-й по маршруту'),
+      el('div', { class: 'head' }, el('span', { class: 'client' }, o.client), el('span', { class: 'lit' }, fmt(o.liters) + ' л')),
       o.address ? el('div', { class: 'addr' }, o.address) : null,
-      el('div', { class: 'meta' }, (o.day !== today ? 'На ' + o.day.split('-').reverse().join('.') + '. ' : '') + (o.private ? 'Частное лицо: возьмите оплату. ' : '') + (o.note || '')),
-      o.lat !== null && o.lat !== undefined ? el('button', { class: 'quiet small nav', onclick: () => openNavigator([o]) }, 'Маршрут в Яндекс Картах') : null,
-      el('div', { class: 'twin' },
-        el('button', { class: 'quiet small', onclick: () => failOrder(o) }, 'Не получилось'),
-        el('button', { class: 'main small order-done', onclick: () => { if (vehicleReady()) { orderForUnload = o; screen = 'unload'; render(); } } }, 'Слил газ')))));
+      (o.day !== today || o.note) ? el('div', { class: 'meta' }, (o.day !== today ? 'На ' + o.day.split('-').reverse().join('.') + '. ' : '') + (o.note || '')) : null,
+      o.private ? el('div', { class: 'pay' }, 'Частное лицо: возьмите оплату') : null,
+      el('div', { class: 'acts' },
+        o.lat !== null && o.lat !== undefined ? el('button', { class: 'nav', 'aria-label': 'Маршрут в Яндекс Картах', onclick: () => openNavigator([o]) }, icon('route'), i === 0 ? 'Маршрут' : null) : null,
+        el('button', { class: 'quiet fail', onclick: () => failOrder(o) }, 'Не получилось'),
+        el('button', { class: 'main order-done', onclick: () => { if (vehicleReady()) { orderForUnload = o; screen = 'unload'; render(); } } }, icon('check'), 'Слил газ')))));
 }
 function openNavigator(list) {
   // Точки в порядке объезда, который рассчитал логист; маршрут строится от текущего места водителя
@@ -392,7 +463,7 @@ function failOrder(o) {
 function renderUnload(u) {
   const canDelete = dayOf(u) === localDate() && u.invoice !== 'done';
   return el('article', { class: 'trip' + (u.pending ? ' pending' : '') },
-    el('div', { class: 'top' }, el('span', null, u.client), el('b', null, fmt(u.liters) + ' л')),
+    el('div', { class: 'top2' }, el('span', null, u.client), el('b', null, fmt(u.liters) + ' л')),
     el('div', { class: 'meta' }, u.plate + (u.trailer ? ' + ' + u.trailer : '') + (u.paid === 'yes' ? '. Оплачено' : (u.paid === 'no' ? '. Не оплачено' : '')) + (u.comment ? '. ' + u.comment : '')),
     el('div', { class: 'act' },
       el('span', { class: 'meta' }, u.pending ? 'Ждёт связи' : ''),
@@ -444,16 +515,19 @@ function renderVehicle() {
   };
   const list = (kind, items) => items.map((p) => el('button', {
     class: 'pick' + (data[kind] === p ? ' on' : ''), onclick: () => choose(kind, p),
-  }, plate(p), (m.tanks || {})[p] ? el('span', null, fmt(m.tanks[p]) + ' л') : null));
+  }, plate(p), (m.tanks || {})[p] ? el('span', { class: 'cap' }, fmt(m.tanks[p]) + ' л') : null, data[kind] === p ? icon('check') : null));
+  const ready = data.plate && !(needsTrailer() && !data.trailer);
   show(
-    el('button', { class: 'quiet back', id: 'back', onclick: () => { screen = 'main'; render(); } }, data.plate && !(needsTrailer() && !data.trailer) ? 'Готово' : 'Назад'),
-    el('h1', null, 'На какой машине работаете?'),
-    el('p', null),
-    m.plates.length ? list('plate', m.plates)
-      : el('p', { class: 'empty' }, 'Списка машин пока нет. Нужна связь с сервером, а машины добавляет весовщик в справочник ТС.'),
-    data.plate && m.trailers.length ? [el('h2', null, needsTrailer() ? 'Какой прицеп подцепили?' : 'Прицеп, если есть'),
-      list('trailer', m.trailers),
-      data.trailer ? el('button', { class: 'quiet', id: 'no-trailer', onclick: () => choose('trailer', '') }, 'Без прицепа') : null] : null,
+    topBar(() => { screen = 'main'; render(); }),
+    page('solo',
+      el('h1', null, 'На какой машине работаете?'),
+      el('p', null),
+      m.plates.length ? list('plate', m.plates)
+        : el('p', { class: 'empty' }, 'Списка машин пока нет. Нужна связь с сервером, а машины добавляет весовщик в справочник ТС.'),
+      data.plate && m.trailers.length ? [el('h2', null, needsTrailer() ? 'Какой прицеп подцепили?' : 'Прицеп, если есть'),
+        list('trailer', m.trailers),
+        data.trailer ? el('button', { class: 'quiet', id: 'no-trailer', onclick: () => choose('trailer', '') }, 'Без прицепа') : null] : null),
+    ready ? dock(true, el('button', { class: 'main', id: 'vehicle-done', onclick: () => { screen = 'main'; render(); } }, icon('check'), 'Готово')) : null,
   );
 }
 
@@ -468,16 +542,18 @@ function updateLive() {
 }
 
 function renderWeigh() {
-  const back = el('button', { class: 'quiet back', id: 'back', onclick: () => { screen = 'main'; weighResult = null; render(); sync(); } }, 'Назад');
+  const leave = () => { screen = 'main'; weighResult = null; render(); sync(); };
   if (weighResult) {
     const r = weighResult;
-    show(back,
-      el('h1', null, r.direction === 'arrival' ? 'Приезд записан' : 'Выезд записан'),
-      el('div', { class: 'weight', id: 'fixed-weight' }, fmt(r.weight) + ' кг'),
-      el('div', { class: 'plates' }, plate(r.plate), r.trailer ? plate(r.trailer) : null),
-      r.gas ? el('div', { class: 'info' }, 'Газа в машине по весам: ', el('b', null, fmt(r.gas.liters) + ' л')) : null,
-      r.photo ? el('img', { class: 'photo', alt: 'Фото машины на весах', src: session.server + r.photo }) : null,
-      el('p', null, 'Можно съезжать с весов.'));
+    show(topBar(leave),
+      page('has-dock',
+        el('div', { class: 'done-mark' }, icon('check'), r.direction === 'arrival' ? 'Приезд записан' : 'Выезд записан'),
+        el('div', { class: 'scale' }, el('div', { class: 'weight', id: 'fixed-weight' }, fmt(r.weight) + ' кг'),
+          el('div', { class: 'meta' }, 'Можно съезжать с весов')),
+        r.gas ? el('div', { class: 'info' }, 'Газа в машине по весам: ', el('b', null, fmt(r.gas.liters) + ' л')) : null,
+        r.photo ? el('img', { class: 'photo', alt: 'Фото машины на весах', src: session.server + r.photo }) : null),
+      dock(false, el('button', { class: 'main', id: 'weigh-done', onclick: leave }, 'Готово')),
+      tabs('weigh'));
     return;
   }
   const error = el('div', { class: 'error', role: 'alert', id: 'weigh-error' });
@@ -503,14 +579,17 @@ function renderWeigh() {
   };
   buttons.push(
     el('button', { class: 'main', id: 'arrival', onclick: () => weigh('arrival') }, 'Приехал на базу'),
-    el('button', { class: 'main', id: 'departure', onclick: () => weigh('departure') }, 'Уехал с базы'));
-  show(back,
-    el('h1', null, 'Взвешивание'),
-    el('p', null, 'Заедьте на весы, остановитесь и нажмите кнопку. Вес записывается с весов на базе.'),
-    el('div', { class: 'plates' }, plate(data.plate), data.trailer ? plate(data.trailer) : null),
-    el('div', { class: 'weight', id: 'live-weight' }, ''),
-    el('div', { class: 'meta', id: 'live-hint' }, ''),
-    el('p', null), buttons[0], el('p', null), buttons[1], error);
+    el('button', { class: 'go', id: 'departure', onclick: () => weigh('departure') }, 'Уехал с базы'));
+  show(topBar(leave),
+    page('has-dock tall',
+      el('h1', null, 'Взвешивание'),
+      el('div', { class: 'scale' },
+        el('div', { class: 'weight', id: 'live-weight' }, ''),
+        el('div', { class: 'meta', id: 'live-hint' }, '')),
+      el('p', { class: 'hint' }, 'Заедьте на весы, остановитесь и нажмите кнопку. Вес записывается с весов базы.'),
+      error),
+    dock(false, el('div', { class: 'weigh-btns' }, buttons)),
+    tabs('weigh'));
   updateLive();
   sync(true);
   pollTimer = setInterval(() => { if (!weighBusy) sync(true); }, 3000);
@@ -548,12 +627,12 @@ function renderUnloadForm() {
   // Частное лицо платит на месте: водитель отмечает, получил ли оплату
   let paid = null;
   const payButtons = [
-    el('button', { type: 'button', id: 'paid-yes', class: 'quiet', onclick: () => setPaid(true) }, 'Оплатил'),
-    el('button', { type: 'button', id: 'paid-no', class: 'quiet', onclick: () => setPaid(false) }, 'Не оплатил')];
+    el('button', { type: 'button', id: 'paid-yes', onclick: () => setPaid(true) }, 'Оплатил'),
+    el('button', { type: 'button', id: 'paid-no', onclick: () => setPaid(false) }, 'Не оплатил')];
   function setPaid(value) {
     paid = value;
-    payButtons[0].className = value ? 'on-choice' : 'quiet';
-    payButtons[1].className = value ? 'quiet' : 'on-choice';
+    payButtons[0].className = value ? 'on-choice' : '';
+    payButtons[1].className = value ? '' : 'on-choice';
   }
   const payWrap = el('div', { id: 'pay', hidden: true }, el('label', null, 'Оплата'), el('div', { class: 'twin' }, payButtons));
   const isPrivate = () => {
@@ -581,6 +660,7 @@ function renderUnloadForm() {
     sync();
   };
   const form = el('form', {
+    id: 'unload-form',
     onsubmit: (event) => {
       event.preventDefault();
       error.textContent = '';
@@ -612,19 +692,20 @@ function renderUnloadForm() {
       store(rounded, clientId, label);
     },
   },
-  order ? el('div', { class: 'info' }, el('b', null, order.client), order.address ? [el('br'), order.address] : null, el('br'), 'Нужно слить: ' + fmt(order.liters) + ' л')
+  order ? el('div', { class: 'target' }, el('b', null, order.client), order.address ? el('div', null, order.address) : null, el('div', { class: 'lit' }, 'По заказу: ' + fmt(order.liters) + ' л'))
     : [el('label', { for: 'client' }, 'Кому слили'), select, newWrap],
-  el('label', { for: 'liters' }, 'Сколько слили, литров'), amount, payWrap,
-  left !== null && left > 0 ? [el('p', null), el('button', { type: 'button', class: 'quiet', id: 'all-left', onclick: () => { amount.value = String(left); } }, 'Весь остаток: ' + fmt(left) + ' л')] : null,
+  el('label', { for: 'liters' }, 'Сколько слили, литров'), amount,
+  el('div', { class: 'chips' },
+    order ? el('button', { type: 'button', onclick: () => { amount.value = String(order.liters); } }, 'Как в заказе: ' + fmt(order.liters) + ' л') : null,
+    left !== null && left > 0 ? el('button', { type: 'button', id: 'all-left', onclick: () => { amount.value = String(left); } }, 'Весь остаток: ' + fmt(left) + ' л') : null),
+  payWrap,
   el('label', { for: 'comment' }, 'Комментарий, если нужен'), comment,
-  el('p', null),
-  el('button', { class: 'main', type: 'submit', id: 'save-unload' }, 'Записать выгрузку'),
   error);
   payWrap.hidden = !isPrivate();
   show(
-    el('button', { class: 'quiet back', id: 'back', onclick: () => { screen = 'main'; render(); } }, 'Назад'),
-    el('h1', null, order ? 'Выгрузка по заказу' : 'Новая выгрузка'), el('p', null),
-    el('div', { class: 'plates' }, plate(data.plate), data.trailer ? plate(data.trailer) : null), form);
+    topBar(() => { screen = 'main'; render(); }),
+    page('solo', el('h1', null, order ? 'Выгрузка по заказу' : 'Новая выгрузка'), form),
+    dock(true, el('button', { class: 'main', type: 'submit', form: 'unload-form', id: 'save-unload' }, icon('check'), 'Записать выгрузку')));
 }
 
 // ----- запуск -----
@@ -632,8 +713,8 @@ if (session) data = load(dataKey(), emptyData());
 render();
 if (session) { sync(); askPush(); }
 window.addEventListener('online', () => sync());
-document.addEventListener('visibilitychange', () => { if (!document.hidden && session && screen === 'main') sync(); });
-setInterval(() => { if (session && screen === 'main' && !overlay.childElementCount) sync(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && session && (screen === 'main' || screen === 'day')) sync(); });
+setInterval(() => { if (session && (screen === 'main' || screen === 'day') && !overlay.childElementCount) sync(); }, 60000);
 // Кнопка «Назад» Android вызывает эту функцию из MainActivity.
 window.avtovesBack = function () {
   if (overlay.childElementCount) { overlay.replaceChildren(); return true; }

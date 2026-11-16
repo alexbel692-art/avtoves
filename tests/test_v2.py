@@ -342,7 +342,7 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         page.click("#departure")
         expect(page.locator(".info")).to_contain_text(f"25{nb}000 л")
         page.click("#back")
-        expect(page.locator("#left")).to_contain_text(f"25{nb}000 л")
+        expect(page.locator("#left .v")).to_have_text(f"25{nb}000л")
 
         # Выгрузка; без связи остаётся в телефоне и считается в остатке
         page.click("#new-unload")
@@ -351,7 +351,7 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         page.click("#save-unload")
         expect(page.locator("#total")).to_have_text(f"15{nb}000,5")
         expect(page.locator("#state")).to_have_text("Все записи отправлены")
-        expect(page.locator("#left")).to_contain_text(f"10{nb}000 л")
+        expect(page.locator("#left .v")).to_have_text(f"10{nb}000л")
         phone.route("**/api/**", lambda route: route.abort())
         page.click("#new-unload")
         page.select_option("#client", "__new")
@@ -359,7 +359,7 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         page.click("#all-left")
         page.click("#save-unload")
         expect(page.locator("#state")).to_contain_text("Не отправлено записей: 1")
-        expect(page.locator("#left")).to_contain_text("0 л")
+        expect(page.locator("#left .v")).to_have_text("0л")
         page.screenshot(path=SHOTS / "app.png", full_page=True)
         page.reload()
         expect(page.locator("#total")).to_have_text(f"25{nb}000,5")
@@ -374,7 +374,7 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         page.evaluate("window.dispatchEvent(new Event('online'))")
         expect(page.locator("#orders")).to_contain_text("с. Южное, ул. Мира, 5")
         expect(page.locator(".toast")).to_contain_text("Новый заказ")
-        store_shot("1-zakazy.png", "#orders")
+        store_shot("1-zakazy.png")
         page.screenshot(path=SHOTS / "orders.png", full_page=True)
         page.click("#orders .order-done")
         assert page.input_value("#liters") == "500"
