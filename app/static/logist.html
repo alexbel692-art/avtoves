@@ -524,18 +524,46 @@ async function renderDriverApp() {
     { name: 'contact', label: 'Контакт для вопросов и удаления данных (почта или телефон)', value: a.contact },
   ], 'Сохранить', async (v) => { await api('/api/logist/appinfo', 'POST', v); render(); });
   const row = (k, v) => el('tr', null, el('th', null, k), el('td', null, v));
+  const upload = el('input', { type: 'file', id: 'fb-file', accept: '.json,application/json', style: 'display:none', onchange: async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      let key;
+      try { key = JSON.parse(await file.text()); } catch (err) { throw new Error('Файл не похож на ключ Firebase (JSON).'); }
+      const res = await api('/api/logist/appinfo/firebase', 'POST', key);
+      appMsg = { ok: 'Ключ Firebase загружен, проект ' + res.project + '. Уведомления водителям включены.' };
+    } catch (err) { appMsg = { error: err.message }; }
+    render();
+  } });
+  const testPush = () => form('Проверить уведомление', [
+    { name: 'driver_id', label: 'Водитель', value: (a.push_list.find((d) => d.phones) || a.push_list[0] || {}).id || '',
+      options: a.push_list.map((d) => ({ value: d.id, label: d.name + (d.phones ? '' : ' — уведомления не включены') })) },
+  ], 'Отправить', async (v) => {
+    const res = await api('/api/logist/appinfo/test-push', 'POST', { driver_id: Number(v.driver_id) });
+    appMsg = { ok: `Уведомление отправлено на телефонов: ${res.phones}.` + (res.dead ? ` Устаревших подписок удалено: ${res.dead}.` : '') };
+  });
   return el('div', null,
     el('p', { class: 'note' }, 'Приложение водителя ставится из Google Play: обновления приходят сами, уведомления о заказах — через Google (Firebase).'),
-    el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'app-edit', onclick: edit }, 'Изменить сведения')),
+    el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'app-edit', onclick: edit }, 'Изменить сведения'),
+      upload, el('button', { id: 'fb-upload', onclick: () => upload.click() }, a.push ? 'Заменить ключ Firebase' : 'Загрузить ключ Firebase'),
+      el('button', { id: 'push-test', onclick: testPush, disabled: !a.push || !a.push_list.length }, 'Проверить уведомление')),
+    appMsg && appMsg.error ? el('div', { class: 'error', role: 'alert', id: 'app-error' }, appMsg.error) : null,
+    appMsg && appMsg.ok ? el('p', { class: 'good', id: 'app-ok' }, appMsg.ok) : null,
     el('div', { class: 'scroll' }, el('table', { id: 'app-info' }, el('tbody', null,
       row('Адрес сервера для приложения', el('b', null, a.host)),
       row('Политика конфиденциальности', el('a', { href: privacy, target: '_blank', rel: 'noopener' }, privacy)),
       row('Компания', a.company || el('span', { class: 'bad' }, 'не указана')),
       row('Контакт для удаления данных', a.contact || el('span', { class: 'bad' }, 'не указан')),
-      row('Уведомления через Google', a.push ? el('span', { class: 'good' }, 'включены (firebase.json на сервере)')
-        : el('span', { class: 'bad' }, 'выключены: положите ключ сервисного аккаунта Firebase в /var/lib/avtoves/data/firebase.json')),
-      row('Водители с включёнными уведомлениями', `${a.push_drivers} из ${a.drivers}`)))));
+      row('Уведомления через Google', a.push ? el('span', { class: 'good' }, 'включены' + (a.project ? ', проект Firebase ' + a.project : ''))
+        : el('span', { class: 'bad' }, 'выключены: загрузите ключ сервисного аккаунта Firebase')),
+      row('Водители с включёнными уведомлениями', `${a.push_drivers} из ${a.drivers}`)))),
+    el('h2', { style: 'margin-top:20px' }, 'Ключ Firebase для уведомлений'),
+    el('ol', { class: 'note' },
+      el('li', null, 'console.firebase.google.com → ваш проект → значок шестерёнки → «Настройки проекта» → «Сервисные аккаунты».'),
+      el('li', null, '«Создать закрытый ключ» → скачается JSON-файл. Нажмите «Загрузить ключ Firebase» и выберите его.'),
+      el('li', null, 'Файл google-services.json сюда не подходит: он нужен для сборки приложения (секрет GOOGLE_SERVICES_JSON на GitHub).')));
 }
+let appMsg = null;
 
 // ----- уведомления -----
 function clientFields(c) {

@@ -428,6 +428,18 @@ def test_driver_calls_client_and_opens_yandex_navigator(env):
         expect(first.locator("button.call")).to_have_text("Позвонить")
         expect(first.locator("button.nav")).to_have_text("Маршрут")
         page.screenshot(path=SHOTS / "app-call-route.png")
+        # Снимок для страницы в Google Play (1080×2160): заказ с кнопками звонка и маршрута
+        store = browser.new_page(viewport={"width": 360, "height": 720}, device_scale_factor=3, locale="ru-RU")
+        store.add_init_script("window.Android = { notify() {}, requestPush() {} };")
+        store.goto(APP_HTML.as_uri())
+        store.fill("#server", public)
+        store.fill("#login", "ivanov")
+        store.fill("#password", PASSWORD)
+        store.click("#enter")
+        expect(store.locator("#orders article").first.locator("button.call")).to_be_visible()
+        store.evaluate("window.scrollTo(0, document.querySelector('#orders').getBoundingClientRect().top + scrollY - 70)")
+        (SHOTS / "play").mkdir(exist_ok=True)
+        store.screenshot(path=SHOTS / "play" / "4-zvonok-marshrut.png")
 
         # Два номера — выбор, один номер — сразу набор
         first.locator("button.call").click()

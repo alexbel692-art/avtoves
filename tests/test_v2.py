@@ -1286,3 +1286,36 @@ def test_driver_app_store_info_and_privacy(env):
         app.goto(APP_HTML.as_uri())
         expect(app.locator("#server")).to_have_value("ves.example.ru")
         browser.close()
+
+
+def test_firebase_key_from_admin_cabinet_and_test_push(env):
+    ctx, local, public, logist = env
+    f = Path(ctx.cfg["data_dir"]) / "firebase.json"
+    key = {"type": "service_account", "project_id": "avtoves-driver", "client_email": "push@avtoves-driver.iam.gserviceaccount.com",
+           "private_key": "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----\n", "private_key_id": "1"}
+    # Только администратор; google-services.json вместо ключа — понятная ошибка
+    assert call(public, "/api/logist/appinfo/firebase", "POST", key, logist)[0] == 403
+    code, res = call(public, "/api/logist/appinfo/firebase", "POST", {"project_info": {"project_id": "x"}, "client": []}, ctx.admin)
+    assert code == 400 and "google-services.json" in res["error"] and not f.exists()
+
+    # Google не принял ключ — файл не остаётся
+    def refuse():
+        raise RuntimeError("invalid_grant: ключ отозван")
+    ctx.pusher.check, ctx.pusher.creds = refuse, None
+    code, res = call(public, "/api/logist/appinfo/firebase", "POST", key, ctx.admin)
+    assert code == 400 and "invalid_grant" in res["error"] and not f.exists()
+    del ctx.pusher.check
+    code, res = call(public, "/api/logist/appinfo/firebase", "POST", key, ctx.admin)
+    assert code == 200 and res["project"] == "avtoves-driver"
+    assert json.loads(f.read_text())["client_email"] == key["client_email"] and (f.stat().st_mode & 0o777) == 0o600
+
+    # Проверочное уведомление: у водителя без подписки — подсказка, с подпиской — уходит на телефон
+    code, res = call(public, "/api/logist/appinfo/test-push", "POST", {"driver_id": 2}, ctx.admin)
+    assert code == 400 and "не включил уведомления" in res["error"]
+    call(public, "/api/app/push-token", "POST", {"token": "phone-ivanov"}, driver_token(public))
+    code, res = call(public, "/api/logist/appinfo/test-push", "POST", {"driver_id": 1}, ctx.admin)
+    assert (code, res) == (200, {"ok": True, "phones": 1, "dead": 0})
+    assert ctx.pusher.sent[-1] == (("phone-ivanov",), "Проверка уведомлений", "АвтоВес: уведомления о заказах работают")
+    info = call(public, "/api/logist/appinfo", token=ctx.admin)[1]
+    assert [(d["name"], d["phones"]) for d in info["push_list"]] == [("Иванов Сергей", 1), ("Петров Пётр", 0)]
+    assert call(public, "/api/logist/appinfo/firebase", "DELETE", token=ctx.admin)[0] == 200 and not f.exists()

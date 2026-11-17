@@ -215,6 +215,17 @@ class Pusher:
     def ready(self) -> bool:
         return self.file.is_file()
 
+    def project_id(self) -> str:
+        try:
+            return str(json.loads(self.file.read_text(encoding="utf-8")).get("project_id") or "")
+        except (OSError, ValueError):
+            return ""
+
+    def check(self):
+        """Ключ рабочий, если Google выдаёт по нему доступ к отправке уведомлений."""
+        self.creds = None
+        self._token()
+
     def _token(self) -> str:
         from google.auth.transport.requests import Request as GRequest
         from google.oauth2 import service_account
@@ -780,8 +791,66 @@ def build_routes(ctx, public: bool) -> list[Route]:
             app_info()
         drivers = db.q("SELECT COUNT(*) AS n FROM drivers WHERE active=1 AND COALESCE(login,'')<>''")[0]["n"]
         return JSONResponse({**app_info(), "push": pusher.ready(), "drivers": drivers,
+                             "project": pusher.project_id() if hasattr(pusher, "project_id") else "",
+                             "push_list": db.q("SELECT d.id, d.name, COUNT(p.token) AS phones FROM drivers d "
+                                               "LEFT JOIN push_tokens p ON p.driver_id=d.id WHERE d.active=1 AND "
+                                               "COALESCE(d.login,'')<>'' GROUP BY d.id ORDER BY d.name"),
                              "push_drivers": db.q("SELECT COUNT(DISTINCT driver_id) AS n FROM push_tokens")[0]["n"],
                              "host": request.headers.get("host", "")})
+
+    @handler
+    async def firebase_key(request: Request):
+        """Ключ сервисного аккаунта Firebase для уведомлений водителям: загружается из кабинета администратора."""
+        admin_of(request)
+        f = Path(ctx.cfg["data_dir"]) / "firebase.json"
+        if request.method == "DELETE":
+            f.unlink(missing_ok=True)
+            if hasattr(pusher, "creds"):
+                pusher.creds = None
+            return JSONResponse({"ok": True})
+        b = await body(request)
+        need = ("type", "project_id", "private_key", "client_email")
+        if b.get("type") != "service_account" or not all(isinstance(b.get(k), str) and b[k] for k in need) \
+                or "PRIVATE KEY" not in b["private_key"]:
+            raise Bad("Это не ключ сервисного аккаунта Firebase. Нужен файл из «Настройки проекта → "
+                      "Сервисные аккаунты → Создать закрытый ключ», а не google-services.json")
+        old = f.read_bytes() if f.is_file() else None
+        f.write_text(json.dumps(b, ensure_ascii=False), encoding="utf-8")
+        try:
+            f.chmod(0o600)
+        except OSError:
+            pass
+        if hasattr(pusher, "check"):
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, pusher.check)
+            except Exception as ex:  # noqa: BLE001 — нет пакета, нет связи или ключ отозван
+                if old is None:
+                    f.unlink(missing_ok=True)
+                else:
+                    f.write_bytes(old)
+                pusher.creds = None
+                raise Bad(f"Google не принял ключ: {str(ex)[:200]}") from ex
+        return JSONResponse({"ok": True, "project": b["project_id"]})
+
+    @handler
+    async def test_push(request: Request):
+        """Проверка: уведомление на телефоны выбранного водителя прямо сейчас."""
+        admin_of(request)
+        b = await body(request)
+        rows = db.q("SELECT id, name FROM drivers WHERE id=?", (b.get("driver_id"),))
+        if not rows:
+            raise Bad("Выберите водителя")
+        if not pusher.ready():
+            raise Bad("Сначала загрузите ключ Firebase")
+        toks = [r["token"] for r in db.q("SELECT token FROM push_tokens WHERE driver_id=?", (rows[0]["id"],))]
+        if not toks:
+            raise Bad(f"{rows[0]['name']} ещё не включил уведомления: пусть войдёт в новую версию приложения "
+                      "из Google Play и разрешит уведомления")
+        dead = await asyncio.get_running_loop().run_in_executor(
+            None, pusher.send, toks, "Проверка уведомлений", "АвтоВес: уведомления о заказах работают")
+        for t in dead:
+            db.x("DELETE FROM push_tokens WHERE token=?", (t,))
+        return JSONResponse({"ok": True, "phones": len(toks) - len(dead), "dead": len(dead)})
 
     @handler
     async def logist_status(_):
@@ -1919,6 +1988,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/logist", logist_page),
         Route("/privacy", privacy_page),
         Route("/api/logist/appinfo", appinfo_api, methods=["GET", "POST"]),
+        Route("/api/logist/appinfo/firebase", firebase_key, methods=["POST", "DELETE"]),
+        Route("/api/logist/appinfo/test-push", test_push, methods=["POST"]),
         Route("/api/logist/status", logist_status),
         Route("/api/logist/setup", logist_setup, methods=["POST"]),
         Route("/api/logist/login", logist_login, methods=["POST"]),
