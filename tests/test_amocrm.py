@@ -397,3 +397,54 @@ def test_amocrm_webhook_updates_requests_at_once(env):
               ctx.admin)[1]
     assert s2["hook_url"] != url
     assert hook(public, secret, "leads[update][0][id]=31611863")[0] == 404
+
+
+def test_driver_calls_client_and_opens_yandex_navigator(env):
+    """В заказе водителя: «Позвонить» (несколько номеров — выбор) и «Маршрут» в Яндекс Навигаторе или Картах."""
+    from playwright.sync_api import expect, sync_playwright
+    from test_v2 import APP_HTML, PASSWORD
+    ctx, local, public, logist = env
+    day = datetime.now().strftime("%Y-%m-%d")
+    ctx.amocrm.opener = FakeAmo(day)
+    call(public, "/api/logist/amocrm", "POST", {"domain": "rosavtonomg", "token": TOKEN, "enabled": True}, ctx.admin)
+    call(public, "/api/logist/amo/sync", "POST", token=logist)
+    for lid in (31611863, 31603247):               # два номера / один номер; адрес без координат
+        assert call(public, "/api/logist/amo/assign", "POST", {"lead_id": lid, "driver_id": 1}, logist)[0] == 200
+    ctx.db.x("UPDATE orders SET lat=55.75, lon=37.62 WHERE amo_lead_id=31603247")
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=2)
+        page.add_init_script("window.Android = { calls: [], routes: [], notify() {}, requestPush() {},"
+                             " dial(p) { this.calls.push(p); }, route(a, p, t) { this.routes.push([a, p, t]); } };")
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(APP_HTML.as_uri())
+        page.fill("#server", public)
+        page.fill("#login", "ivanov")
+        page.fill("#password", PASSWORD)
+        page.click("#enter")
+        first, second = page.locator("#orders article").nth(0), page.locator("#orders article").nth(1)
+        expect(first).to_contain_text("[Д] Солнечногорский - Ирина")
+        expect(first.locator("button.call")).to_have_text("Позвонить")
+        expect(first.locator("button.nav")).to_have_text("Маршрут")
+        page.screenshot(path=SHOTS / "app-call-route.png")
+
+        # Два номера — выбор, один номер — сразу набор
+        first.locator("button.call").click()
+        expect(page.locator(".sheet .pick-app")).to_have_text(["+79166814775", "89166814775"])
+        page.screenshot(path=SHOTS / "app-call-pick.png")
+        page.click("#call-1")
+        second.locator("button.call").click()
+        assert page.evaluate("window.Android.calls") == ["89166814775", "+79260000003"]
+
+        # Маршрут: без координат — по адресу, с координатами — в точку; Навигатор или Карты на выбор
+        first.locator("button.nav").click()
+        expect(page.locator(".sheet .pick-app")).to_have_text(["Яндекс Навигатор", "Яндекс Карты"])
+        page.screenshot(path=SHOTS / "app-route-pick.png")
+        page.click("#route-navi")
+        second.locator("button.nav").click()
+        page.click("#route-maps")
+        assert page.evaluate("window.Android.routes") == [
+            ["navi", "", "Солнечногорский, Ленинградское шоссе"], ["maps", "55.75,37.62", ""]]
+        browser.close()
+    assert errors == []

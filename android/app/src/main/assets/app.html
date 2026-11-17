@@ -98,12 +98,16 @@ button.on-choice { background: var(--ink); color: #fff; box-shadow: none; }
 .order .pay { display: inline-block; background: var(--warn-soft); color: var(--warn); font-weight: 700; font-size: 13.5px; border-radius: 8px; padding: 3px 8px; margin-top: 6px; }
 .order .acts { display: grid; grid-template-columns: 1fr 1.35fr; gap: 8px; margin-top: 12px; }
 .order .acts button { font-size: 17px; white-space: nowrap; padding: 8px 10px; }
-.order .acts .nav { grid-column: 1 / -1; }
-.order:not(.first) .acts { grid-template-columns: auto 1fr 1.35fr; }
-.order:not(.first) .acts .nav { grid-column: auto; }
+.order .acts.go { grid-template-columns: 1fr 1fr; margin-top: 12px; }
+.order .acts.go button { color: var(--blue); background: var(--blue-soft); border-color: transparent; font-weight: 700; }
+.order .acts.go button:only-child { grid-column: 1 / -1; }
+.order .acts.go + .acts { margin-top: 8px; }
+.order .phone-text { color: var(--muted); font-size: 14.5px; margin-top: 2px; }
+.sheet { display: flex; flex-direction: column; gap: 10px; }
+.sheet p { margin: 0 0 4px; font-weight: 700; }
+.sheet .pick-app { font-size: 18px; min-height: 58px; }
 .order .fail { color: var(--bad); }
-.order .phones { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.order .call { display: inline-block; background: var(--blue-soft, #e6effb); color: var(--blue); font-weight: 700; font-size: 16px; border-radius: 10px; padding: 7px 12px; text-decoration: none; }
+
 #route-all { margin-bottom: 10px; background: var(--blue-soft); color: var(--blue-d); box-shadow: none; }
 .empty-card { background: var(--paper); border-radius: 16px; padding: 22px 18px; text-align: center; color: var(--muted); }
 .empty-card b { display: block; color: var(--ink); font-size: 18px; margin-bottom: 4px; }

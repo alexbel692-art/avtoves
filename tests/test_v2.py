@@ -1115,7 +1115,9 @@ def test_addresses_and_route_from_yandex(env):
         page.click("#enter")
         expect(page.locator("#route-all")).to_contain_text("3 точ.")
         page.click("#route-all")
+        page.click("#route-maps")                     # выбор: Яндекс Навигатор или Яндекс Карты
         page.locator("#orders article .nav").first.click()
+        page.click("#route-maps")
         coords = {o["client"]: f'{o["lat"]:g},{o["lon"]:g}' for o in mine}
         assert page.evaluate("window.Android.routes") == ["~".join(coords[n] for n in res["order"]), coords[res["order"][0]]]
         browser.close()

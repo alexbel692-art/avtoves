@@ -69,6 +69,7 @@ const ICONS = {
   scale: 'M4 19h16M6.5 19 8 12h8l1.5 7M12 12V6M8.5 6h7',
   day: 'M5 5h14v15H5zM5 9h14M9 3v4M15 3v4M8.5 13h3M8.5 16.5h6',
   route: 'M4 11 20 4l-7 16-2-7z',
+  phone: 'M6.6 3.5h3l1.5 4-2 1.3a11 11 0 0 0 6.1 6.1l1.3-2 4 1.5v3A2.1 2.1 0 0 1 18.2 20 15.6 15.6 0 0 1 4 5.8a2.1 2.1 0 0 1 2.6-2.3z',
   back: 'M15 5l-7 7 7 7',
   check: 'M5 12.5 10 17 19 7',
   drop: 'M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z',
@@ -422,16 +423,18 @@ function orderList() {
   const today = localDate();
   const onMap = orders.filter((o) => o.lat !== null && o.lat !== undefined);
   return el('section', { id: 'orders' }, el('h2', null, 'Заказы: ' + orders.length),
-    onMap.length > 1 ? el('button', { class: 'nav', id: 'route-all', onclick: () => openNavigator(onMap) }, icon('route'), `Весь маршрут в Яндекс Картах (${onMap.length} точ.)`) : null,
+    onMap.length > 1 ? el('button', { class: 'nav', id: 'route-all', onclick: () => chooseNavigator(onMap) }, icon('route'), `Весь маршрут (${onMap.length} точ.)`) : null,
     orders.map((o, i) => el('article', { class: 'order' + (i === 0 ? ' first' : '') },
       el('div', { class: 'num' }, i === 0 ? 'Следующий' : (i + 1) + '-й по маршруту'),
       el('div', { class: 'head' }, el('span', { class: 'client' }, o.client), el('span', { class: 'lit' }, fmt(o.liters) + ' л')),
       o.address ? el('div', { class: 'addr' }, o.address) : null,
       (o.day !== today || orderNote(o)) ? el('div', { class: 'meta' }, (o.day !== today ? 'На ' + o.day.split('-').reverse().join('.') + '. ' : '') + orderNote(o)) : null,
-      o.phone ? el('div', { class: 'phones' }, o.phone.split(',').map((x) => x.trim()).filter(Boolean).map((x) => el('a', { class: 'call', href: 'tel:' + x.replace(/[^\d+]/g, '') }, '📞 ' + x))) : null,
+      o.phone ? el('div', { class: 'phone-text' }, o.phone) : null,
       o.private ? el('div', { class: 'pay' }, 'Частное лицо: возьмите оплату') : null,
+      (phonesOf(o).length || canRoute(o)) ? el('div', { class: 'acts go' },
+        phonesOf(o).length ? el('button', { class: 'call', onclick: () => callClient(o) }, icon('phone'), 'Позвонить') : null,
+        canRoute(o) ? el('button', { class: 'nav', onclick: () => chooseNavigator([o]) }, icon('route'), 'Маршрут') : null) : null,
       el('div', { class: 'acts' },
-        o.lat !== null && o.lat !== undefined ? el('button', { class: 'nav', 'aria-label': 'Маршрут в Яндекс Картах', onclick: () => openNavigator([o]) }, icon('route'), i === 0 ? 'Маршрут' : null) : null,
         el('button', { class: 'quiet fail', onclick: () => failOrder(o) }, 'Не получилось'),
         el('button', { class: 'main order-done', onclick: () => { if (vehicleReady()) { orderForUnload = o; screen = 'unload'; render(); } } }, icon('check'), 'Слил газ')))));
 }
@@ -440,14 +443,46 @@ function orderNote(o) {
   const note = o.note || '';
   return o.phone && note.startsWith('Тел.: ' + o.phone) ? note.slice(('Тел.: ' + o.phone).length).replace(/^\.\s*/, '') : note;
 }
-function openNavigator(list) {
-  // Точки в порядке объезда, который рассчитал логист; маршрут строится от текущего места водителя
-  const points = list.slice(0, 50).map((o) => `${o.lat},${o.lon}`).join('~');
+// ---- звонок клиенту и маршрут в Яндекс Навигаторе или Яндекс Картах
+const hasPoint = (o) => o.lat !== null && o.lat !== undefined && o.lon !== null && o.lon !== undefined;
+const canRoute = (o) => hasPoint(o) || !!(o.address || '').trim();
+function phonesOf(o) {
+  return (o.phone || '').split(',').map((x) => x.trim()).filter((x) => x.replace(/\D/g, '').length >= 5);
+}
+function dial(number) {
+  const tel = number.replace(/[^\d+]/g, '');
+  try { if (native && native.dial) { native.dial(tel); return; } } catch (e) { /* нет моста */ }
+  location.href = 'tel:' + tel;
+}
+function sheet(title, options) {
+  const close = () => overlay.replaceChildren();
+  overlay.replaceChildren(el('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true', onclick: (e) => { if (e.target === e.currentTarget) close(); } },
+    el('div', { class: 'sheet' }, el('p', null, title),
+      options.map(([id, label, act]) => el('button', { id, class: 'pick-app', onclick: () => { close(); act(); } }, label)),
+      el('button', { class: 'quiet', onclick: close }, 'Отмена'))));
+}
+function callClient(o) {
+  const list = phonesOf(o);
+  if (list.length === 1) { dial(list[0]); return; }
+  sheet('Позвонить: ' + o.client, list.map((x, i) => ['call-' + i, x, () => dial(x)]));
+}
+function chooseNavigator(list) {
+  const title = list.length === 1 ? 'Маршрут: ' + list[0].client : `Маршрут через ${list.length} точ.`;
+  sheet(title, [['route-navi', 'Яндекс Навигатор', () => openNavigator(list, 'navi')],
+    ['route-maps', 'Яндекс Карты', () => openNavigator(list, 'maps')]]);
+}
+function openNavigator(list, app) {
+  // Точки в порядке объезда, который рассчитал логист; маршрут строится от текущего места водителя.
+  // Без координат — по адресу: Навигатор и Карты сами найдут его.
+  const withPoints = list.filter(hasPoint);
+  const points = withPoints.slice(0, 50).map((o) => `${o.lat},${o.lon}`).join('~');
+  const text = withPoints.length ? '' : (list[0].address || '').trim().slice(0, 300);
   try {
-    if (native && native.openRoute) { native.openRoute(points); return; }
-    if (native && native.openMap && list.length === 1) { native.openMap(list[0].lat, list[0].lon, list[0].client); return; }
+    if (native && native.route) { native.route(app || 'maps', points, text); return; }
+    if (points && native && native.openRoute) { native.openRoute(points); return; }
   } catch (e) { /* нет моста */ }
-  window.open(`https://yandex.ru/maps/?rtext=~${points}&rtt=auto`, '_blank');
+  const to = points || encodeURIComponent(text);
+  window.open(`https://yandex.ru/maps/?rtext=~${to}&rtt=auto`, '_blank');
 }
 function failOrder(o) {
   const reason = el('input', { id: 'fail-reason', maxlength: 200 });
