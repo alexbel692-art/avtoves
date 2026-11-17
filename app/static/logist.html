@@ -127,6 +127,19 @@ button.tile:hover { border-color:var(--accent); }
 .tip { position:fixed; z-index:50; background:var(--ink); color:#fff; padding:6px 9px; border-radius:7px; font-size:13px; pointer-events:none; white-space:nowrap; }
 details.tableview { margin-top:8px; font-size:13px; }
 details.tableview summary { cursor:pointer; color:var(--muted); }
+.req-days { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 14px; }
+.req-days button { min-height:34px; padding:2px 10px; font-weight:500; }
+.req-days button[aria-current="page"] { background:var(--ink); color:#fff; border-color:var(--ink); }
+.req-days button small { color:inherit; opacity:.75; }
+.req-base { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin:18px 0 8px; }
+.req-base h2 { margin:0; font-size:18px; }
+#requests td { vertical-align:top; }
+#requests td.cond { max-width:280px; white-space:pre-line; font-size:13.5px; }
+#requests td.phone { white-space:nowrap; font-size:13.5px; }
+#requests select { min-width:160px; max-width:210px; }
+#requests .plate { font-size:13px; font-weight:700; margin-top:4px; }
+#requests td.state { min-width:120px; font-size:14px; }
+#requests tr.free td:first-child { box-shadow:inset 4px 0 0 #f0a000; }
 .pick-list { max-height:50vh; overflow:auto; border:1px solid var(--line); border-radius:8px; }
 .pick-list td { padding:5px 8px; }
 .pick-list input[type=text] { min-height:32px; width:120px; }
@@ -275,10 +288,10 @@ async function render() {
     const badge = 'Уведомления' + (me.notices ? ` (${me.notices})` : '');
     const groups = manager
       ? [['', [['home', 'Сводка'], ['notices', badge], ['report', 'Выгрузки']]], ['Настройки', [['logists', 'Мой пароль']]]]
-      : [['', [['home', 'Сводка'], ['notices', badge], ['map', 'Карта'], ['orders', 'Заказы']]],
+      : [['', [['home', 'Сводка'], ['notices', badge], ['requests', 'Заявки amoCRM'], ['map', 'Карта'], ['orders', 'Заказы']]],
         ['Учёт', [['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания']]],
         ['Справочники', [['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']]]]
-        .concat(me.admin ? [['Подключения', [['stavtrack', 'Ставтрэк'], ['routing', 'Маршруты'], ['driverapp', 'Приложение водителя']]]] : []);
+        .concat(me.admin ? [['Подключения', [['amocrm', 'amoCRM'], ['stavtrack', 'Ставтрэк'], ['routing', 'Маршруты'], ['driverapp', 'Приложение водителя']]]] : []);
     const tabs = groups.flatMap(([, items]) => items);
     if (!tabs.some(([id]) => id === tab)) tab = 'home';
     const title = tabs.find(([id]) => id === tab)[1].replace(/ \(\d+\)$/, '');
@@ -287,7 +300,7 @@ async function render() {
       el('nav', { 'aria-label': 'Разделы' }, groups.map(([name, items]) => [name ? el('div', { class: 'group' }, name) : null,
         items.map(([id, label]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, label))])),
       el('div', { class: 'who' }, el('div', null, me.name || me.login), el('button', { id: 'logout', onclick: () => { setToken(null); dashMonth = null; render(); } }, 'Выйти (' + me.login + ')')));
-    const body = await ({ home: renderHome, notices: renderNotices, map: renderMap, orders: renderOrders, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting, driverapp: renderDriverApp })[tab]();
+    const body = await ({ home: renderHome, notices: renderNotices, map: renderMap, orders: renderOrders, requests: renderRequests, amocrm: renderAmo, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting, driverapp: renderDriverApp })[tab]();
     if (run !== renderCount) return;
     view.className = 'app';
     view.replaceChildren(head, el('main', { class: 'page' }, el('h1', null, title), body));
@@ -684,6 +697,129 @@ async function renderOrders() {
           el('button', { onclick: () => edit(o) }, o.status === 'new' ? 'Изменить' : 'Отправить заново'),
           o.status === 'new' ? el('button', { onclick: () => confirmBox(`Отменить заказ: ${o.client}, ${fmt(o.liters)} л?`, 'Отменить заказ', () => api(`/api/logist/orders/${o.id}/cancel`, 'POST')) }, 'Отменить') : null)))))))
       : el('p', { class: 'empty' }, 'На эти дни заказов нет. Создайте заказ: водитель увидит адрес и объём в приложении.'));
+}
+
+// ----- заявки из amoCRM -----
+let reqDay = today;
+let reqBase = '';
+let reqMsg = null;
+const shiftDay = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
+const ruDay = (d) => d.slice(8, 10) + '.' + d.slice(5, 7) + '.' + d.slice(0, 4);
+async function renderRequests() {
+  const r = await api('/api/logist/amo/leads?day=' + reqDay);
+  const go = (d) => { if (d) { reqDay = d; reqMsg = null; render(); } };
+  const syncNow = async () => {
+    try { const res = await api('/api/logist/amo/sync', 'POST'); reqMsg = { ok: `Обновлено из amoCRM: получено сделок ${res.count}, изменилось ${res.changed}.` }; }
+    catch (err) { reqMsg = { error: err.message }; }
+    render();
+  };
+  const assign = async (lead, value) => {
+    try { await api('/api/logist/amo/assign', 'POST', { lead_id: lead.lead_id, driver_id: value ? Number(value) : null }); reqMsg = null; }
+    catch (err) { reqMsg = { error: err.message }; }
+    render();
+  };
+  const active = (l) => l.order_status === 'new' || l.order_status === 'done';
+  const state = (l) => ({
+    new: 'У водителя в приложении',
+    done: el('span', { class: 'good' }, 'Выполнена: ' + fmt(l.fact) + ' л' + (l.paid === 'no' ? ', не оплачено' : (l.paid === 'yes' ? ', оплачено' : ''))),
+    failed: el('span', { class: 'bad' }, 'Не выполнена: ' + l.reason),
+  })[l.order_status] || el('span', { class: 'bad' }, 'Водитель не назначен');
+  const driverCell = (l) => {
+    if (l.order_status === 'done') return l.driver;
+    const pick = el('select', { 'aria-label': 'Водитель для ' + l.client, onchange: (e) => assign(l, e.target.value) },
+      el('option', { value: '' }, '— не назначен —'),
+      r.drivers.map((d) => el('option', { value: d.id, selected: l.order_status === 'new' && l.driver_id === d.id }, d.name + (d.plate ? ' · ' + d.plate : ''))));
+    return pick;
+  };
+  const phones = (p) => (p ? p.split(',').map((x) => x.trim()).filter(Boolean).map((x, i) => [i ? el('br') : null, el('a', { href: 'tel:' + x.replace(/[^\d+]/g, '') }, x)]) : '');
+  const allBases = [...new Set(r.leads.map((l) => l.base || 'База не указана'))];
+  if (reqBase && !allBases.includes(reqBase)) reqBase = '';
+  const groups = allBases.filter((b) => !reqBase || b === reqBase).map((b) => [b, r.leads.filter((l) => (l.base || 'База не указана') === b)]);
+  const free = r.leads.filter((l) => !active(l)).length;
+  const sumL = (rows) => rows.reduce((a, l) => a + (l.liters || 0), 0);
+  const a = r.amo;
+  return el('div', null,
+    el('div', { class: 'controls' },
+      el('button', { 'aria-label': 'Предыдущий день', onclick: () => go(shiftDay(reqDay, -1)) }, '◀'),
+      el('label', null, 'Дата доставки', el('input', { type: 'date', id: 'req-day', value: reqDay, onchange: (e) => go(e.target.value) })),
+      el('button', { 'aria-label': 'Следующий день', onclick: () => go(shiftDay(reqDay, 1)) }, '▶'),
+      reqDay !== today ? el('button', { onclick: () => go(today) }, 'Сегодня') : null,
+      el('button', { class: 'primary', id: 'req-sync', onclick: syncNow, disabled: !a.ready }, 'Обновить из amoCRM'),
+      allBases.length > 1 ? el('div', { class: 'seg', role: 'group', 'aria-label': 'База' },
+        [['', 'Все базы']].concat(allBases.map((b) => [b, b])).map(([v, t]) => el('button', { 'aria-current': reqBase === v ? 'page' : null, onclick: () => { reqBase = v; render(); } }, t))) : null),
+    !a.ready ? el('p', { class: 'note', id: 'req-off' }, 'amoCRM не подключён. ' + (me.admin ? 'Откройте «Подключения → amoCRM»: укажите адрес amoCRM и ключ доступа.' : 'Попросите администратора подключить amoCRM.'))
+      : el('p', { class: 'note', id: 'req-state' }, 'Заявки приходят из amoCRM сами' + (a.last_sync ? ', последнее обновление ' + when(a.last_sync) : '') + '. Выберите водителя — заявка сразу уйдёт ему в приложение.'),
+    a.last_error ? el('div', { class: 'error', role: 'alert' }, 'amoCRM: ' + a.last_error) : null,
+    reqMsg && reqMsg.error ? el('div', { class: 'error', role: 'alert', id: 'req-error' }, reqMsg.error) : null,
+    reqMsg && reqMsg.ok ? el('p', { class: 'good', id: 'req-ok' }, reqMsg.ok) : null,
+    r.days.length ? el('div', { class: 'req-days', 'aria-label': 'Дни с заявками' }, r.days.map((d) => el('button', { 'aria-current': d.day === reqDay ? 'page' : null, onclick: () => go(d.day) },
+      d.day.slice(8, 10) + '.' + d.day.slice(5, 7) + ' ', el('small', null, d.n + (d.free ? ` (${d.free} без вод.)` : ''))))) : null,
+    r.leads.length ? el('p', { class: 'figures' }, el('b', { id: 'req-total' }, fmt(sumL(r.leads))), ' л, заявок: ', r.leads.length,
+      free ? el('span', { class: 'bad' }, ', без водителя: ' + free) : null) : null,
+    r.leads.length ? groups.map(([b, rows]) => el('section', null,
+      el('div', { class: 'req-base' }, el('h2', null, b), el('span', null, fmt(sumL(rows)) + ' л · заявок: ' + rows.length)),
+      el('div', { class: 'scroll' }, el('table', { id: 'requests' },
+        el('thead', null, el('tr', null, el('th', null, 'Район и шоссе'), el('th', { class: 'num' }, 'Литры'),
+          ['Клиент', 'Телефон', 'Менеджер', 'Особые условия', 'Водитель и газовоз', 'Состояние', ''].map((t) => el('th', null, t)))),
+        el('tbody', null, rows.map((l) => el('tr', { class: active(l) ? null : 'free', 'data-lead': l.lead_id },
+          el('td', null, el('b', null, l.district), l.highway ? el('div', null, el('small', null, l.highway)) : null),
+          el('td', { class: 'num' }, l.liters ? fmt(l.liters) : el('span', { class: 'bad' }, 'нет')),
+          el('td', null, l.client, l.address ? el('div', null, el('small', null, l.address)) : null), el('td', { class: 'phone' }, phones(l.phone)),
+          el('td', null, l.manager), el('td', { class: 'cond' }, l.conditions),
+          el('td', null, driverCell(l), l.plate ? el('div', { class: 'plate' }, l.plate) : null), el('td', { class: 'state' }, state(l)),
+          el('td', null, l.url ? el('a', { href: l.url, target: '_blank', rel: 'noopener' }, 'amoCRM') : null))))))))
+      : el('p', { class: 'empty' }, 'На ' + ruDay(reqDay) + ' заявок нет.'));
+}
+
+// ----- подключение amoCRM -----
+let amoMeta = null;
+async function renderAmo() {
+  const s = await api('/api/logist/amocrm');
+  const loadMeta = async () => { try { amoMeta = await api('/api/logist/amocrm/meta'); } catch (err) { amoMeta = { error: err.message }; } render(); };
+  const setup = () => form('Подключение amoCRM', [
+    { name: 'domain', label: 'Адрес amoCRM, например company.amocrm.ru', value: s.domain },
+    { name: 'token', label: s.token_set ? 'Долгосрочный токен (пусто — не менять)' : 'Долгосрочный токен', type: 'password' },
+    { name: 'enabled', label: 'Забирать заявки из amoCRM', value: s.enabled ? '1' : '0', options: [{ value: '1', label: 'Да' }, { value: '0', label: 'Нет' }] },
+    { name: 'interval_min', label: 'Как часто обновлять, минут', value: s.interval_min, inputmode: 'numeric' },
+    { name: 'days_back', label: 'При первом обмене взять сделки, изменённые за последние, дней', value: s.days_back, inputmode: 'numeric' },
+  ], 'Сохранить', async (v) => { await api('/api/logist/amocrm', 'POST', { ...v, enabled: v.enabled === '1' }); amoMeta = null; });
+  const mapFields = async () => {
+    if (!amoMeta || amoMeta.error) {
+      try { amoMeta = await api('/api/logist/amocrm/meta'); } catch (err) { amoMeta = { error: err.message }; render(); return; }
+    }
+    const opts = [{ value: '', label: 'Не использовать' }].concat(amoMeta.fields.map((f) => ({ value: f.id, label: f.name + (f.type === 'date' || f.type === 'date_time' ? ' (дата)' : '') })));
+    form('Поля сделки в amoCRM', [
+      { name: 'pipeline_id', label: 'Воронка', value: s.pipeline_id || 0, options: [{ value: 0, label: 'Все воронки' }].concat(amoMeta.pipelines.map((p) => ({ value: p.id, label: p.name }))) },
+    ].concat(s.roles.map(([role, title]) => ({ name: role, label: title, value: s.fields[role] ?? amoMeta.guess[role] ?? '', options: opts }))),
+    'Сохранить', async (v) => {
+      const fields = {};
+      for (const [role] of s.roles) fields[role] = v[role] ? Number(v[role]) : null;
+      await api('/api/logist/amocrm', 'POST', { domain: s.domain, enabled: s.enabled, pipeline_id: Number(v.pipeline_id), fields });
+    });
+  };
+  const names = {};
+  if (amoMeta && amoMeta.fields) for (const f of amoMeta.fields) names[f.id] = f.name;
+  const row = (k, v) => el('tr', null, el('th', null, k), el('td', null, v));
+  return el('div', null,
+    el('p', { class: 'note' }, 'Сделки с датой доставки приходят во вкладку «Заявки amoCRM», разложенные по дням и базам, как в таблице логиста. Закрытые и нереализованные сделки не показываются. Изменения сделки (литры, дата, условия) доходят до водителя сами.'),
+    el('div', { class: 'controls' },
+      el('button', { class: 'primary', id: 'amo-setup', onclick: setup }, 'Подключение'),
+      el('button', { id: 'amo-fields', onclick: mapFields, disabled: !s.token_set || !s.domain }, 'Поля сделки'),
+      el('button', { id: 'amo-check', onclick: loadMeta, disabled: !s.token_set || !s.domain }, 'Проверить связь')),
+    amoMeta && amoMeta.error ? el('div', { class: 'error', role: 'alert', id: 'amo-error' }, amoMeta.error) : null,
+    amoMeta && amoMeta.fields ? el('p', { class: 'good', id: 'amo-ok' }, `Связь есть: полей сделки ${amoMeta.fields.length}, воронок ${amoMeta.pipelines.length}.`) : null,
+    el('div', { class: 'scroll' }, el('table', { id: 'amo-info' }, el('tbody', null,
+      row('Состояние', s.ready ? el('span', { class: 'good' }, 'заявки забираются каждые ' + s.interval_min + ' мин') : el('span', { class: 'bad' }, s.enabled ? 'не хватает настроек: адрес, ключ или поле «Дата доставки»' : 'выключено')),
+      row('Адрес amoCRM', s.domain || el('span', { class: 'bad' }, 'не указан')),
+      row('Ключ доступа', s.token_set ? 'задан' : el('span', { class: 'bad' }, 'не задан')),
+      row('Последний обмен', s.last_sync ? when(s.last_sync) + (s.last_error ? '' : ', сделок: ' + s.last_count) : 'ещё не было'),
+      s.last_error ? row('Ошибка', el('span', { class: 'bad' }, s.last_error)) : null,
+      s.roles.map(([role, title]) => row('Поле «' + title + '»', s.fields[role] ? (names[s.fields[role]] || 'выбрано (ID ' + s.fields[role] + ')') : el('small', null, 'не выбрано')))))),
+    el('h2', { style: 'margin-top:20px' }, 'Как получить ключ доступа'),
+    el('ol', { class: 'note' },
+      el('li', null, 'В amoCRM под администратором: amoМаркет → кнопка «⋯» справа вверху → «Создать интеграцию» → «Внешняя интеграция».'),
+      el('li', null, 'Название — «АвтоВес», доступ — к сделкам и контактам. Сохраните.'),
+      el('li', null, 'Во вкладке «Ключи и доступы» нажмите «Сгенерировать долгосрочный токен», скопируйте его и вставьте в «Подключение».')));
 }
 
 // ----- взвешивания с фото -----

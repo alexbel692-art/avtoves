@@ -427,12 +427,18 @@ function orderList() {
       el('div', { class: 'num' }, i === 0 ? 'Следующий' : (i + 1) + '-й по маршруту'),
       el('div', { class: 'head' }, el('span', { class: 'client' }, o.client), el('span', { class: 'lit' }, fmt(o.liters) + ' л')),
       o.address ? el('div', { class: 'addr' }, o.address) : null,
-      (o.day !== today || o.note) ? el('div', { class: 'meta' }, (o.day !== today ? 'На ' + o.day.split('-').reverse().join('.') + '. ' : '') + (o.note || '')) : null,
+      (o.day !== today || orderNote(o)) ? el('div', { class: 'meta' }, (o.day !== today ? 'На ' + o.day.split('-').reverse().join('.') + '. ' : '') + orderNote(o)) : null,
+      o.phone ? el('div', { class: 'phones' }, o.phone.split(',').map((x) => x.trim()).filter(Boolean).map((x) => el('a', { class: 'call', href: 'tel:' + x.replace(/[^\d+]/g, '') }, '📞 ' + x))) : null,
       o.private ? el('div', { class: 'pay' }, 'Частное лицо: возьмите оплату') : null,
       el('div', { class: 'acts' },
         o.lat !== null && o.lat !== undefined ? el('button', { class: 'nav', 'aria-label': 'Маршрут в Яндекс Картах', onclick: () => openNavigator([o]) }, icon('route'), i === 0 ? 'Маршрут' : null) : null,
         el('button', { class: 'quiet fail', onclick: () => failOrder(o) }, 'Не получилось'),
         el('button', { class: 'main order-done', onclick: () => { if (vehicleReady()) { orderForUnload = o; screen = 'unload'; render(); } } }, icon('check'), 'Слил газ')))));
+}
+// Телефон заявки из amoCRM показывается кнопкой звонка; в примечании он только для старых версий приложения
+function orderNote(o) {
+  const note = o.note || '';
+  return o.phone && note.startsWith('Тел.: ' + o.phone) ? note.slice(('Тел.: ' + o.phone).length).replace(/^\.\s*/, '') : note;
 }
 function openNavigator(list) {
   // Точки в порядке объезда, который рассчитал логист; маршрут строится от текущего места водителя

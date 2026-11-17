@@ -29,6 +29,7 @@ from . import __version__
 from . import settings as st
 from .plates import normalize as norm_plate
 from .routing import PRECISE, RouteError, Routing, best_order
+from .amocrm import ROLES as AMO_ROLES, AmoCRM, AmoError, clean_domain
 from .stavtrack import Stavtrack, StError
 from .weighing import DriverError
 
@@ -266,8 +267,10 @@ def init_db(db):
         for table, cols in (
                 ("clients", [("address", "TEXT NOT NULL DEFAULT ''"), ("private", "INTEGER NOT NULL DEFAULT 0"),
                              ("manager_id", "INTEGER"), ("lat", "REAL"), ("lon", "REAL"),
-                             ("geo_precision", "TEXT NOT NULL DEFAULT ''"), ("geo_text", "TEXT NOT NULL DEFAULT ''")]),
-                ("orders", [("lat", "REAL"), ("lon", "REAL"), ("geo_precision", "TEXT NOT NULL DEFAULT ''")]),
+                             ("geo_precision", "TEXT NOT NULL DEFAULT ''"), ("geo_text", "TEXT NOT NULL DEFAULT ''"),
+                             ("phone", "TEXT NOT NULL DEFAULT ''"), ("amo_contact_id", "INTEGER")]),
+                ("orders", [("lat", "REAL"), ("lon", "REAL"), ("geo_precision", "TEXT NOT NULL DEFAULT ''"),
+                            ("phone", "TEXT NOT NULL DEFAULT ''"), ("amo_lead_id", "INTEGER")]),
                 ("unloads", [("order_id", "INTEGER"), ("paid", "TEXT NOT NULL DEFAULT ''"), ("paid_at", "TEXT"),
                              ("paid_by", "TEXT NOT NULL DEFAULT ''")]),
                 ("logists", [("role", "TEXT NOT NULL DEFAULT 'logist'")])):
@@ -357,6 +360,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
     if getattr(ctx, "routing", None) is None:
         ctx.routing = Routing(db)
     routing = ctx.routing
+    if getattr(ctx, "amocrm", None) is None:
+        ctx.amocrm = AmoCRM(db)
+    amo = ctx.amocrm
 
     def parse_coords(value: str) -> tuple[float, float]:
         try:
@@ -522,7 +528,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
             "scale": {"connected": sc["connected"], "weight": sc["weight"], "stable": sc["stable"]},
             "state_text": c["state_text"], "warning": c["warning"],
             "clients": db.q("SELECT id, name, private FROM clients WHERE active=1 ORDER BY name"),
-            "orders": db.q("SELECT o.id, o.client_id, c.name AS client, c.private, o.address, o.liters, o.day, o.note, "
+            "orders": db.q("SELECT o.id, o.client_id, c.name AS client, c.private, o.address, o.liters, o.day, o.note, o.phone, "
                            "COALESCE(o.lat, c.lat) AS lat, COALESCE(o.lon, c.lon) AS lon "
                            "FROM orders o JOIN clients c ON c.id=o.client_id "
                            "WHERE o.driver_id=? AND o.status='new' ORDER BY o.day, o.pos, o.id", (d["id"],)),
@@ -1206,33 +1212,49 @@ def build_routes(ctx, public: bool) -> list[Route]:
         day = str(b.get("day") or "")
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
             raise Bad("Укажите дату")
-        f = (client[0]["id"], text(b.get("address"), "Адрес", 300, False) or client[0]["address"],
-             liters_value(b.get("liters")), driver[0]["id"], day, text(b.get("note"), "Примечание", 300, False))
-        oid = b.get("id")
+        args = (client[0], text(b.get("address"), "Адрес", 300, False), liters_value(b.get("liters")),
+                driver[0]["id"], day, text(b.get("note"), "Примечание", 300, False), b.get("id"), u["login"])
+        oid = await asyncio.get_running_loop().run_in_executor(None, lambda: save_order(*args))
+        return JSONResponse({"ok": True, "id": oid})
+
+    def geo_for_order(client: dict, address: str):
+        """Свой адрес заказа ищем отдельно; если адрес как у клиента — берутся координаты клиента."""
+        if address and address != client["address"]:
+            return locate("", address, None)[:3]
+        return (None, None, "")
+
+    def save_order(client: dict, address: str, liters: float, driver_id: int, day: str, note: str,
+                         oid, login: str, phone: str = "", amo_lead_id: int | None = None,
+                         quiet: bool = False) -> int:
+        """Новый заказ или изменение заказа водителю; водитель получает уведомление.
+        Ищет координаты адреса, поэтому из обработчиков запросов вызывается в отдельном потоке."""
+        f = (client["id"], address or client["address"], liters, driver_id, day, note)
         if oid:
             old = db.q("SELECT * FROM orders WHERE id=?", (oid,))
             if not old:
                 raise Bad("Заказ не найден", 404)
             if old[0]["status"] == "done":
                 raise Bad("Заказ уже выполнен")
+            changed = any(old[0][k] != v for k, v in zip(("client_id", "address", "liters", "driver_id", "day", "note"), f)) \
+                or old[0]["status"] != "new" or (old[0]["phone"] or "") != phone
             db.x("UPDATE orders SET client_id=?,address=?,liters=?,driver_id=?,day=?,note=?,status='new',reason='',"
-                 "closed=NULL WHERE id=?", (*f, oid))
+                 "closed=NULL, phone=? WHERE id=?", (*f, phone, oid))
             if old[0]["driver_id"] != f[3] and old[0]["status"] == "new":
-                push(old[0]["driver_id"], "Заказ снят", f"{client[0]['name']}: заказ передан другому водителю")
-            push(f[3], "Заказ изменён" if old[0]["driver_id"] == f[3] else "Новый заказ",
-                 f"{client[0]['name']}: {f[2]:g} л. {f[1]}".strip())
+                push(old[0]["driver_id"], "Заказ снят", f"{client['name']}: заказ передан другому водителю")
+            if changed or not quiet:
+                push(f[3], "Заказ изменён" if old[0]["driver_id"] == f[3] and old[0]["status"] == "new" else "Новый заказ",
+                     f"{client['name']}: {f[2]:g} л. {f[1]}".strip())
+            moved = old[0]["address"] != f[1]
         else:
             pos = db.q("SELECT COALESCE(MAX(pos),0)+1 AS p FROM orders WHERE driver_id=? AND day=?", (f[3], day))[0]["p"]
-            oid = db.x("INSERT INTO orders(client_id,address,liters,driver_id,day,note,pos,created,created_by) "
-                       "VALUES(?,?,?,?,?,?,?,?,?)", (*f, pos, now_iso(), u["login"]))
-            push(f[3], "Новый заказ", f"{client[0]['name']}: {f[2]:g} л. {f[1]}".strip())
-        # Свой адрес заказа ищем отдельно; если адрес как у клиента — берутся координаты клиента
-        own_geo = (None, None, "")
-        if f[1] and f[1] != client[0]["address"]:
-            loop = asyncio.get_running_loop()
-            own_geo = (await loop.run_in_executor(None, locate, "", f[1], None))[:3]
-        db.x("UPDATE orders SET lat=?, lon=?, geo_precision=? WHERE id=?", (*own_geo, oid))
-        return JSONResponse({"ok": True, "id": oid})
+            oid = db.x("INSERT INTO orders(client_id,address,liters,driver_id,day,note,pos,created,created_by,phone,amo_lead_id) "
+                       "VALUES(?,?,?,?,?,?,?,?,?,?,?)", (*f, pos, now_iso(), login, phone, amo_lead_id))
+            push(f[3], "Новый заказ", f"{client['name']}: {f[2]:g} л. {f[1]}".strip())
+            moved = True
+        if moved:
+            own_geo = geo_for_order(client, f[1])
+            db.x("UPDATE orders SET lat=?, lon=?, geo_precision=? WHERE id=?", (*own_geo, oid))
+        return oid
 
     @handler
     async def orders_route(request: Request):
@@ -1326,6 +1348,196 @@ def build_routes(ctx, public: bool) -> list[Route]:
         if rows[0]["status"] == "new":
             push(rows[0]["driver_id"], "Заказ отменён", f"{rows[0]['client']}: {rows[0]['liters']:g} л")
         return JSONResponse({"ok": True})
+
+    # ---- заявки из amoCRM: логист выбирает водителя, заявка уходит заказом в приложение
+    def amo_client(lead: dict) -> dict:
+        """Клиент заявки: по контакту amoCRM, иначе по имени; новый клиент — частное лицо."""
+        name = (lead["client"] or lead["name"] or f"Сделка {lead['lead_id']}")[:120]
+        rows = db.q("SELECT * FROM clients WHERE amo_contact_id=?", (lead["contact_id"],)) if lead["contact_id"] else []
+        if not rows:
+            rows = [r for r in db.q("SELECT * FROM clients") if r["name"].casefold() == name.casefold()]
+        mgr = db.q("SELECT id FROM logists WHERE role='manager' AND active=1 AND name=?",
+                   (lead["manager"],)) if lead["manager"] else []
+        mgr_id = mgr[0]["id"] if mgr else None
+        if rows:
+            cid = rows[0]["id"]
+            db.x("UPDATE clients SET amo_contact_id=COALESCE(?, amo_contact_id), phone=CASE WHEN ?<>'' THEN ? ELSE phone END, "
+                 "active=1, manager_id=COALESCE(manager_id, ?) WHERE id=?",
+                 (lead["contact_id"], lead["phone"], lead["phone"], mgr_id, cid))
+        else:
+            cid = db.x("INSERT INTO clients(name, private, reviewed, manager, manager_id, phone, amo_contact_id) "
+                       "VALUES(?,1,1,?,?,?,?)", (name, lead["manager"][:120], mgr_id, lead["phone"], lead["contact_id"]))
+        return db.q("SELECT * FROM clients WHERE id=?", (cid,))[0]
+
+    def amo_note(lead: dict) -> str:
+        parts = (["Тел.: " + lead["phone"]] if lead["phone"] else []) + \
+                ([lead["conditions"]] if lead["conditions"] else []) + \
+                (["Менеджер: " + lead["manager"]] if lead["manager"] else [])
+        note = ""
+        for p in parts:
+            p = p.strip().rstrip(".")
+            note += ("" if not note else " " if note[-1] in "!?" else ". ") + p
+        return note if len(note) <= 300 else note[:299] + "…"
+
+    def amo_address(lead: dict) -> str:
+        return lead["address"] or ", ".join(x for x in (lead["district"], lead["highway"]) if x)[:300]
+
+    def amo_order(lead: dict) -> dict | None:
+        rows = db.q("SELECT o.*, c.name AS client FROM orders o JOIN clients c ON c.id=o.client_id WHERE o.id=?",
+                    (lead["order_id"],)) if lead["order_id"] else []
+        return rows[0] if rows else None
+
+    def amo_cancel(order: dict, why: str):
+        db.x("UPDATE orders SET status='cancelled', closed=? WHERE id=?", (now_iso(), order["id"]))
+        push(order["driver_id"], "Заказ отменён", f"{order['client']}: {why}")
+
+    def amo_assign(lead_id: int, driver_id, login: str):
+        rows = db.q("SELECT * FROM amo_leads WHERE lead_id=?", (lead_id,))
+        if not rows:
+            raise Bad("Заявка не найдена", 404)
+        lead, order = rows[0], amo_order(rows[0])
+        if order and order["status"] == "done":
+            raise Bad("Заявка уже выполнена")
+        if not driver_id:
+            if order and order["status"] == "new":
+                amo_cancel(order, "заказ снят логистом")
+            return None
+        if lead["lost"] or not lead["day"]:
+            raise Bad("Сделка закрыта в amoCRM или в ней нет даты доставки")
+        driver = db.q("SELECT * FROM drivers WHERE id=? AND active=1", (driver_id,))
+        if not driver:
+            raise Bad("Выберите водителя")
+        if not driver[0]["login"]:
+            raise Bad("У водителя нет входа в приложение: задайте логин и пароль во вкладке «Водители»")
+        if not lead["liters"]:
+            raise Bad("В сделке amoCRM не указаны литры")
+        oid = save_order(amo_client(lead), amo_address(lead), liters_value(lead["liters"]), driver[0]["id"], lead["day"],
+                         amo_note(lead), order["id"] if order else None, login, lead["phone"], lead_id)
+        db.x("UPDATE amo_leads SET order_id=? WHERE lead_id=?", (oid, lead_id))
+        return oid
+
+    def amo_lead_changed(lead_id: int):
+        """Сделку изменили в amoCRM: заказ у водителя обновляется, закрытая сделка снимает заказ."""
+        rows = db.q("SELECT * FROM amo_leads WHERE lead_id=?", (lead_id,))
+        order = amo_order(rows[0]) if rows else None
+        if not order or order["status"] != "new":
+            return
+        lead = rows[0]
+        if lead["lost"] or not lead["day"] or not lead["liters"]:
+            amo_cancel(order, "сделка закрыта в amoCRM")
+            return
+        save_order(amo_client(lead), amo_address(lead), liters_value(lead["liters"]), order["driver_id"], lead["day"],
+                   amo_note(lead), order["id"], "amoCRM", lead["phone"], lead_id, quiet=True)
+
+    amo.on_lead = amo_lead_changed
+    amo.start()
+
+    @handler
+    async def amo_leads(request: Request):
+        logist_of(request)
+        day = request.query_params.get("day") or datetime.now().strftime("%Y-%m-%d")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            raise Bad("Некорректная дата")
+        rows = db.q("SELECT a.*, o.status AS order_status, o.driver_id, o.reason, d.name AS driver, un.liters AS fact, "
+                    "un.paid, un.plate AS fact_plate FROM amo_leads a LEFT JOIN orders o ON o.id=a.order_id LEFT JOIN drivers d ON d.id=o.driver_id "
+                    "LEFT JOIN unloads un ON un.id=o.unload_id WHERE a.day=? AND a.lost=0 "
+                    "ORDER BY a.base, a.highway, a.district, a.lead_id", (day,))
+        drivers = [{"id": d["id"], "name": d["name"], "plate": combo_of(d)[0]}
+                   for d in db.q("SELECT * FROM drivers WHERE active=1 AND login<>'' ORDER BY name")]
+        plates = {d["id"]: d["plate"] for d in drivers}
+        s_ = amo.public()
+        for r in rows:
+            r["plate"] = (r.pop("fact_plate") or plates.get(r["driver_id"], "")) if r["order_status"] == "done" \
+                else plates.get(r["driver_id"], "") if r["order_status"] == "new" else ""
+            r.pop("fact_plate", None)
+            r["url"] = f"https://{s_['domain']}/leads/detail/{r['lead_id']}" if s_["domain"] else ""
+        days = db.q("SELECT day, COUNT(*) AS n, SUM(CASE WHEN order_id IS NULL THEN 1 ELSE 0 END) AS free FROM amo_leads "
+                    "WHERE lost=0 AND day BETWEEN date(?, '-7 day') AND date(?, '+14 day') GROUP BY day ORDER BY day",
+                    (day, day))
+        return JSONResponse({"day": day, "leads": rows, "drivers": drivers, "days": days,
+                             "amo": {k: s_[k] for k in ("enabled", "ready", "domain", "last_sync", "last_error", "last_count")}})
+
+    @handler
+    async def amo_assign_api(request: Request):
+        u = logist_of(request)
+        b = await body(request)
+        try:
+            lead_id = int(b.get("lead_id"))
+            driver_id = int(b["driver_id"]) if b.get("driver_id") not in (None, "", 0) else None
+        except (TypeError, ValueError) as exc:
+            raise Bad("Некорректная заявка или водитель") from exc
+        oid = await asyncio.get_running_loop().run_in_executor(None, amo_assign, lead_id, driver_id, u["login"])
+        return JSONResponse({"ok": True, "order_id": oid})
+
+    @handler
+    async def amo_sync_api(request: Request):
+        logist_of(request)
+        if not amo.ready():
+            raise Bad("amoCRM не подключён: попросите администратора открыть «Подключения → amoCRM»")
+        try:
+            res = await asyncio.get_running_loop().run_in_executor(None, amo.sync)
+        except AmoError as ex:
+            raise Bad(str(ex), 502) from ex
+        return JSONResponse({"ok": True, "count": res["count"], "changed": res["changed"]})
+
+    @handler
+    async def amo_settings_api(request: Request):
+        admin_of(request)
+        if request.method == "POST":
+            b = await body(request)
+            cur = amo.settings()
+            try:
+                new = {"enabled": bool(b.get("enabled")), "domain": clean_domain(b.get("domain"))}
+            except AmoError as ex:
+                raise Bad(str(ex)) from ex
+            if b.get("token"):
+                new["token"] = text(b["token"], "Ключ доступа", 4000).replace(" ", "")
+            for key, lo, hi in (("interval_min", 1, 120), ("days_back", 1, 365)):
+                if b.get(key) not in (None, ""):
+                    try:
+                        val = int(str(b[key]).strip())
+                    except ValueError as exc:
+                        raise Bad("Укажите целое число") from exc
+                    if not lo <= val <= hi:
+                        raise Bad(f"Значение должно быть от {lo} до {hi}")
+                    new[key] = val
+            if "pipeline_id" in b:
+                try:
+                    new["pipeline_id"] = int(b.get("pipeline_id") or 0)
+                except (TypeError, ValueError) as exc:
+                    raise Bad("Некорректная воронка") from exc
+            if isinstance(b.get("fields"), dict):
+                fields = {}
+                for role, _ in AMO_ROLES:
+                    v = b["fields"].get(role)
+                    if v not in (None, "", 0):
+                        try:
+                            fields[role] = int(v)
+                        except (TypeError, ValueError) as exc:
+                            raise Bad("Некорректное поле amoCRM") from exc
+                if new["enabled"] and not fields.get("day"):
+                    raise Bad("Выберите поле «Дата доставки»: без него заявки не разложить по дням")
+                new["fields"] = fields
+            amo.save(new)
+            # Первое подключение: поля угадываются по названиям, их можно поправить
+            if not amo.settings()["fields"] and amo.settings()["token"] and amo.settings()["domain"]:
+                try:
+                    meta = await asyncio.get_running_loop().run_in_executor(None, amo.meta)
+                    amo.save({"fields": meta["guess"]})
+                except AmoError:
+                    pass
+            if cur.get("token") != amo.settings()["token"] or cur.get("domain") != amo.settings()["domain"]:
+                amo.save({"last_error": ""})
+        return JSONResponse(amo.public())
+
+    @handler
+    async def amo_meta_api(request: Request):
+        admin_of(request)
+        try:
+            meta = await asyncio.get_running_loop().run_in_executor(None, amo.meta)
+        except AmoError as ex:
+            raise Bad(str(ex), 502) from ex
+        return JSONResponse(meta)
 
     # ---- Ставтрэк: топливо по ДУТ
     def admin_of(request: Request) -> dict:
@@ -1664,6 +1876,11 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/orders/route", orders_route, methods=["POST"]),
         Route("/api/logist/routing", routing_api, methods=["GET", "POST"]),
         Route("/api/logist/orders/{oid:int}/seen", order_note_done, methods=["POST"]),
+        Route("/api/logist/amo/leads", amo_leads),
+        Route("/api/logist/amo/assign", amo_assign_api, methods=["POST"]),
+        Route("/api/logist/amo/sync", amo_sync_api, methods=["POST"]),
+        Route("/api/logist/amocrm", amo_settings_api, methods=["GET", "POST"]),
+        Route("/api/logist/amocrm/meta", amo_meta_api),
         Route("/api/logist/weighings", weighings_api),
         Route("/api/logist/map", map_api),
         Route("/api/logist/stavtrack", stavtrack_api, methods=["GET", "POST"]),
