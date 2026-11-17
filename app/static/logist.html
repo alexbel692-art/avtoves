@@ -286,17 +286,20 @@ async function render() {
     refs = await api('/api/logist/refs');
     const manager = me.role === 'manager';
     const badge = 'Уведомления' + (me.notices ? ` (${me.notices})` : '');
-    const groups = manager
-      ? [['', [['home', 'Сводка'], ['notices', badge], ['report', 'Выгрузки']]], ['Настройки', [['logists', 'Мой пароль']]]]
-      : [['', [['home', 'Сводка'], ['notices', badge], ['requests', 'Заявки amoCRM'], ['map', 'Карта'], ['orders', 'Заказы']]],
-        ['Учёт', [['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания']]],
-        ['Справочники', [['clients', 'Клиенты'], ['drivers', 'Водители'], ['logists', 'Логисты и менеджеры']]]]
-        .concat(me.admin ? [['Подключения', [['amocrm', 'amoCRM'], ['stavtrack', 'Ставтрэк'], ['routing', 'Маршруты'], ['driverapp', 'Приложение водителя']]]] : []);
+    // Администратор — отдельный пользователь: только пользователи и подключения. У логиста и менеджера их нет.
+    const groups = me.admin
+      ? [['Пользователи', [['logists', 'Логисты и менеджеры'], ['drivers', 'Водители']]],
+        ['Подключения', [['amocrm', 'amoCRM'], ['stavtrack', 'Ставтрэк'], ['routing', 'Маршруты'], ['driverapp', 'Приложение водителя']]]]
+      : manager
+        ? [['', [['home', 'Сводка'], ['notices', badge], ['report', 'Выгрузки']]], ['Настройки', [['logists', 'Мой пароль']]]]
+        : [['', [['home', 'Сводка'], ['notices', badge], ['requests', 'Заявки amoCRM'], ['map', 'Карта'], ['orders', 'Заказы']]],
+          ['Учёт', [['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания']]],
+          ['Справочники', [['clients', 'Клиенты']]], ['Настройки', [['logists', 'Мой пароль']]]];
     const tabs = groups.flatMap(([, items]) => items);
-    if (!tabs.some(([id]) => id === tab)) tab = 'home';
+    if (!tabs.some(([id]) => id === tab)) tab = tabs[0][0];
     const title = tabs.find(([id]) => id === tab)[1].replace(/ \(\d+\)$/, '');
     const head = el('aside', null,
-      el('div', { class: 'brand' }, 'АвтоВес', el('small', null, manager ? 'Кабинет менеджера' : 'Кабинет логиста')),
+      el('div', { class: 'brand' }, 'АвтоВес', el('small', null, me.admin ? 'Администратор' : manager ? 'Кабинет менеджера' : 'Кабинет логиста')),
       el('nav', { 'aria-label': 'Разделы' }, groups.map(([name, items]) => [name ? el('div', { class: 'group' }, name) : null,
         items.map(([id, label]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, label))])),
       el('div', { class: 'who' }, el('div', null, me.name || me.login), el('button', { id: 'logout', onclick: () => { setToken(null); dashMonth = null; render(); } }, 'Выйти (' + me.login + ')')));
@@ -331,9 +334,8 @@ async function renderLogin() {
         setToken(res.token); render();
       } catch (err) { error.textContent = err.message; }
     },
-  }, el('h1', null, status.setup ? 'Первый логист' : 'Кабинет логиста и менеджера'),
-  status.setup ? el('p', { class: 'note' }, 'Логистов пока нет. Создайте первого: он сможет добавлять остальных.') : null,
-  status.empty && !status.setup ? el('p', { class: 'note' }, 'Логистов пока нет. Первого создают в программе АвтоВес на весовой, вкладка «Уведомления».') : null,
+  }, el('h1', null, status.setup ? 'Первый логист' : 'Кабинет АвтоВес'),
+  status.admin_file ? el('p', { class: 'note', id: 'admin-hint' }, 'Первый вход администратора: логин и пароль — в файле ' + status.admin_file + ' на сервере.') : null,
   status.setup ? el('label', null, 'Имя', name) : null,
   el('label', null, 'Логин', login), el('label', null, status.setup ? 'Пароль, от 8 символов' : 'Пароль', password),
   el('button', { class: 'primary', type: 'submit', id: 'l-enter' }, status.setup ? 'Создать логиста' : 'Войти'), error));
@@ -747,7 +749,7 @@ async function renderRequests() {
       el('button', { class: 'primary', id: 'req-sync', onclick: syncNow, disabled: !a.ready }, 'Обновить из amoCRM'),
       allBases.length > 1 ? el('div', { class: 'seg', role: 'group', 'aria-label': 'База' },
         [['', 'Все базы']].concat(allBases.map((b) => [b, b])).map(([v, t]) => el('button', { 'aria-current': reqBase === v ? 'page' : null, onclick: () => { reqBase = v; render(); } }, t))) : null),
-    !a.ready ? el('p', { class: 'note', id: 'req-off' }, 'amoCRM не подключён. ' + (me.admin ? 'Откройте «Подключения → amoCRM»: укажите адрес amoCRM и ключ доступа.' : 'Попросите администратора подключить amoCRM.'))
+    !a.ready ? el('p', { class: 'note', id: 'req-off' }, 'amoCRM не подключён. Подключает администратор: «Подключения → amoCRM».')
       : el('p', { class: 'note', id: 'req-state' }, 'Заявки приходят из amoCRM сами' + (a.last_sync ? ', последнее обновление ' + when(a.last_sync) : '') + '. Выберите водителя — заявка сразу уйдёт ему в приложение.'),
     a.last_error ? el('div', { class: 'error', role: 'alert' }, 'amoCRM: ' + a.last_error) : null,
     reqMsg && reqMsg.error ? el('div', { class: 'error', role: 'alert', id: 'req-error' }, reqMsg.error) : null,
@@ -1155,18 +1157,18 @@ function renderDrivers() {
 }
 async function renderLogists() {
   const list = await api('/api/logist/logists');
-  const add = () => form('Добавить логиста или менеджера', [
+  const add = () => form('Добавить пользователя', [
     { name: 'name', label: 'Имя' }, { name: 'login', label: 'Логин' }, { name: 'password', label: 'Пароль, от 8 символов', type: 'password' },
-    { name: 'kind', label: 'Кто это', value: 'manager', options: [{ value: 'manager', label: 'Менеджер: видит оплаты и счета своих клиентов' }, { value: 'logist', label: 'Логист' }, { value: 'admin', label: 'Логист-администратор: может добавлять пользователей' }] },
-  ], 'Добавить пользователя', (v) => api('/api/logist/logists', 'POST', { name: v.name, login: v.login, password: v.password, admin: v.kind === 'admin', role: v.kind === 'manager' ? 'manager' : 'logist' }));
+    { name: 'kind', label: 'Кто это', value: 'logist', options: [{ value: 'logist', label: 'Логист: заявки, заказы, клиенты, сверка' }, { value: 'manager', label: 'Менеджер: видит оплаты и счета своих клиентов' }, { value: 'admin', label: 'Администратор: пользователи и подключения' }] },
+  ], 'Добавить пользователя', (v) => api('/api/logist/logists', 'POST', { name: v.name, login: v.login, password: v.password, role: v.kind }));
   const pass = (l) => form('Новый пароль: ' + l.login, [{ name: 'password', label: 'Пароль, от 8 символов', type: 'password' }], 'Сменить пароль', async (v) => {
     const res = await api('/api/logist/logists', 'POST', { id: l.id, password: v.password });
     if (res.token) setToken(res.token);
   });
-  return el('div', null, me.admin ? el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'add-logist', onclick: add }, 'Добавить логиста или менеджера')) : null,
+  return el('div', null, me.admin ? el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'add-logist', onclick: add }, 'Добавить пользователя')) : null,
     el('div', { class: 'scroll' }, el('table', { id: 'logists' },
       el('thead', null, el('tr', null, ['Логин', 'Имя', 'Права', ''].map((t) => el('th', null, t)))),
-      el('tbody', null, list.map((l) => el('tr', { class: l.active ? null : 'off' }, el('td', null, l.login), el('td', null, l.name), el('td', null, l.role === 'manager' ? 'Менеджер' : (l.admin ? 'Логист-администратор' : 'Логист')),
+      el('tbody', null, list.map((l) => el('tr', { class: l.active ? null : 'off' }, el('td', null, l.login), el('td', null, l.name), el('td', null, { admin: 'Администратор', manager: 'Менеджер' }[l.role] || 'Логист'),
         el('td', null, el('div', { class: 'actions' },
           me.admin || l.login === me.login ? el('button', { onclick: () => pass(l) }, 'Сменить пароль') : null,
           me.admin && l.login !== me.login ? el('button', { onclick: async () => { await api('/api/logist/logists', 'POST', { id: l.id, active: !l.active }); render(); } }, l.active ? 'Отключить' : 'Включить') : null))))))));

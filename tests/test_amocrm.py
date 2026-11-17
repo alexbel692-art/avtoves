@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta
 
-from test_v2 import SHOTS, call, driver_token, env, wait_push  # noqa: F401
+from test_v2 import SHOTS, admin_password, call, driver_token, env, wait_push  # noqa: F401
 
 TOKEN = "dolgosrochnyi-token"
 F_DAY, F_DISTRICT, F_HIGHWAY, F_BASE, F_LITERS, F_COND, F_DRIVER = 101, 102, 103, 104, 105, 106, 107
@@ -133,15 +133,16 @@ def test_amocrm_requests_to_driver_app(env):
 
     # Подключение: неверный ключ не принимается, верный — поля сделки определяются по названиям
     assert call(public, "/api/logist/amocrm", "POST", {"domain": "https://rosavtonomg.amocrm.ru/leads/pipeline/9",
-                                                         "token": "wrong", "enabled": True}, logist)[0] == 200
-    code, res = call(public, "/api/logist/amocrm/meta", token=logist)
+                                                         "token": "wrong", "enabled": True}, ctx.admin)[0] == 200
+    code, res = call(public, "/api/logist/amocrm/meta", token=ctx.admin)
     assert code == 502 and "ключ" in res["error"]
-    code, s = call(public, "/api/logist/amocrm", "POST", {"domain": "rosavtonomg", "token": TOKEN, "enabled": True}, logist)
+    code, s = call(public, "/api/logist/amocrm", "POST", {"domain": "rosavtonomg", "token": TOKEN, "enabled": True}, ctx.admin)
     assert code == 200 and s["domain"] == "rosavtonomg.amocrm.ru" and s["token_set"] and "token" not in s
     assert s["fields"] == {"day": F_DAY, "district": F_DISTRICT, "highway": F_HIGHWAY, "base": F_BASE,
                            "liters": F_LITERS, "conditions": F_COND}
     assert s["ready"]
-    assert call(public, "/api/logist/amocrm", "POST", {"domain": "evil.example.com", "enabled": True}, logist)[0] == 400
+    assert call(public, "/api/logist/amocrm", "POST", {"domain": "evil.example.com", "enabled": True}, ctx.admin)[0] == 400
+    assert call(public, "/api/logist/amocrm", "POST", {"domain": "rosavtonomg", "enabled": False}, logist)[0] == 403
 
     # Обмен: закрытая и сделка без даты в заявки не попадают; база по району, если в сделке пусто
     code, res = call(public, "/api/logist/amo/sync", "POST", token=logist)
@@ -221,7 +222,7 @@ def test_amocrm_requests_to_driver_app(env):
 
     # Доступ: настройки — только администратору, доска — только логисту
     assert call(public, "/api/logist/logists", "POST", {"name": "Анна", "login": "anna", "password": "parol-menedzhera",
-                                                          "role": "manager"}, logist)[0] == 200
+                                                          "role": "manager"}, ctx.admin)[0] == 200
     anna = call(public, "/api/logist/login", "POST", {"login": "anna", "password": "parol-menedzhera"})[1]["token"]
     for path in ("/api/logist/amo/leads", "/api/logist/amocrm"):
         assert call(public, path, token=anna)[0] == 403
@@ -244,16 +245,22 @@ def test_amocrm_requests_in_browser(env):
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(public + "/logist")
-        page.fill("#l-login", "olga")
-        page.fill("#l-pass", "parol-logista")
-        page.click("#l-enter")
+
+        def login(user, password):
+            page.fill("#l-login", user)
+            page.fill("#l-pass", password)
+            page.click("#l-enter")
+        login("olga", "parol-logista")
         expect(page.locator("main h1")).to_have_text("Сводка")
 
-        # Заявки до подключения — подсказка, где подключить
+        # Заявки до подключения — подсказка, кто подключает
         page.click("nav button[data-tab='requests']")
-        expect(page.locator("#req-off")).to_contain_text("Подключения → amoCRM")
+        expect(page.locator("#req-off")).to_contain_text("Подключает администратор")
+        expect(page.locator("nav button[data-tab='amocrm']")).to_have_count(0)
 
         # Подключение amoCRM администратором
+        page.click("#logout")
+        login("admin", admin_password(ctx))
         page.click("nav button[data-tab='amocrm']")
         page.click("#amo-setup")
         page.fill("dialog input[name='domain']", "rosavtonomg.amocrm.ru")
@@ -266,7 +273,9 @@ def test_amocrm_requests_in_browser(env):
         expect(page.locator("#amo-info")).to_contain_text("Поле «Литры план»Литры план")
         page.screenshot(path=SHOTS / "amocrm-settings.png", full_page=True)
 
-        # Доска заявок: по базам, назначение водителя из списка
+        # Доска заявок у логиста: по базам, назначение водителя из списка
+        page.click("#logout")
+        login("olga", "parol-logista")
         page.click("nav button[data-tab='requests']")
         page.click("#req-sync")
         expect(page.locator("#req-ok")).to_contain_text("Обновлено из amoCRM")

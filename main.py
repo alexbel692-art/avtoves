@@ -46,8 +46,18 @@ def main():
     ap.add_argument("--config", default=None)
     ap.add_argument("--simulate", action="store_true")
     ap.add_argument("--version", action="version", version=__version__)
+    ap.add_argument("--reset-admin", action="store_true",
+                    help="задать новый пароль администратору кабинета (или создать его) и выйти")
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.reset_admin:
+        from app.db import DB
+        from app.logist import ensure_admin, init_db
+        db = DB(Path(cfg["data_dir"]) / "avtoves.db")
+        init_db(db)
+        login, password = ensure_admin(db, cfg["data_dir"], reset=True)
+        print(f"Администратор кабинета: логин {login}, пароль {password}")
+        return
     setup_logging(cfg["data_dir"])
     ctx = Runtime(cfg, force_simulate=args.simulate)
     logging.info("АвтоВес %s запущен: http://%s:%s (настройки: %s)", __version__,

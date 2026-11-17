@@ -126,15 +126,30 @@ def env(tmp_path):
     db.save_vehicle({"plate": "Т100АА26", "kind": "tractor", "tare": 8000})
     db.save_vehicle({"plate": "АВ123477", "kind": "trailer", "tare": 7000, "tank_l": 45000})
     db.save_vehicle({"plate": "ВЕ567877", "kind": "trailer", "tare": 7500, "tank_l": 28000})
-    code, res = call(local, "/api/logist/setup", "POST", {"login": "Olga", "password": "parol-logista", "name": "Ольга"})
+    # Администратор создаётся сам; логистов, менеджеров и водителей добавляет он
+    ctx.admin = admin_token(ctx, public)
+    assert call(public, "/api/logist/logists", "POST", {"login": "Olga", "password": "parol-logista", "name": "Ольга",
+                                                         "role": "logist"}, ctx.admin)[0] == 200
+    code, res = call(public, "/api/logist/login", "POST", {"login": "olga", "password": "parol-logista"})
     assert code == 200
     logist = res["token"]
     for name, login in (("Иванов Сергей", "ivanov"), ("Петров Пётр", "petrov")):
-        assert call(public, "/api/logist/drivers", "POST", {"name": name, "login": login, "password": PASSWORD}, logist)[0] == 200
+        assert call(public, "/api/logist/drivers", "POST", {"name": name, "login": login, "password": PASSWORD}, ctx.admin)[0] == 200
     call(public, "/api/logist/clients", "POST", {"name": "АГЗС Север", "legal": True, "legal_name": "ООО «Север»", "manager": "Анна"}, logist)
     call(public, "/api/logist/clients", "POST", {"name": "Свой склад", "legal": False}, logist)
     yield ctx, local, public, logist
     local_srv.should_exit = public_srv.should_exit = True
+
+
+def admin_password(ctx):
+    text = (Path(ctx.cfg["data_dir"]) / "admin-password.txt").read_text(encoding="utf-8")
+    return re.search(r"Пароль: (\S+)", text).group(1)
+
+
+def admin_token(ctx, public):
+    code, res = call(public, "/api/logist/login", "POST", {"login": "admin", "password": admin_password(ctx)})
+    assert code == 200, res
+    return res["token"]
 
 
 def driver_token(public, login="ivanov"):
@@ -196,14 +211,64 @@ def test_logins_lockout_and_password_change(env):
         assert call(public, "/api/app/login", "POST", {"login": "petrov", "password": "wrong"})[0] == 401
     assert call(public, "/api/app/login", "POST", {"login": "petrov", "password": PASSWORD})[0] == 429
     # Смена пароля и отключение водителя отзывают вход
-    call(public, "/api/logist/drivers", "POST", {"id": 1, "name": "Иванов Сергей", "login": "ivanov", "password": "novyi-parol"}, logist)
+    call(public, "/api/logist/drivers", "POST", {"id": 1, "name": "Иванов Сергей", "login": "ivanov", "password": "novyi-parol"}, ctx.admin)
     assert call(public, "/api/app/me", token=token)[0] == 401
     assert call(public, "/api/app/login", "POST", {"login": "ivanov", "password": "novyi-parol"})[0] == 200
-    call(public, "/api/logist/drivers", "POST", {"id": 1, "name": "Иванов Сергей", "login": "ivanov", "active": False}, logist)
+    call(public, "/api/logist/drivers", "POST", {"id": 1, "name": "Иванов Сергей", "login": "ivanov", "active": False}, ctx.admin)
     assert call(public, "/api/app/login", "POST", {"login": "ivanov", "password": "novyi-parol"})[0] == 401
     # Короткий пароль не принимается; пароли в ответах не отдаются
-    assert call(public, "/api/logist/drivers", "POST", {"name": "Новый", "login": "n", "password": "123"}, logist)[0] == 400
+    assert call(public, "/api/logist/drivers", "POST", {"name": "Новый", "login": "n", "password": "123"}, ctx.admin)[0] == 400
     assert "pass_hash" not in json.dumps(call(public, "/api/logist/refs", token=logist)[1])
+
+
+def test_admin_is_separate_user(env):
+    from app.logist import ensure_admin, init_db
+    ctx, local, public, logist = env
+    admin_file = Path(ctx.cfg["data_dir"]) / "admin-password.txt"
+    assert admin_file.is_file() and "Логин: admin" in admin_file.read_text(encoding="utf-8")
+    # Подсказка, где пароль администратора, — только в локальной сети
+    assert call(local, "/api/logist/status")[1]["admin_file"] == str(admin_file)
+    assert call(public, "/api/logist/status")[1]["admin_file"] == ""
+    me = call(public, "/api/logist/me", token=ctx.admin)[1]
+    assert (me["role"], me["admin"]) == ("admin", True)
+    assert call(public, "/api/logist/me", token=logist)[1]["admin"] is False
+
+    # Логист не добавляет пользователей и не видит подключения; свой пароль менять может
+    for path, method, body in (("/api/logist/drivers", "POST", {"name": "x", "login": "x", "password": "12345678"}),
+                               ("/api/logist/logists", "POST", {"login": "hack", "password": "12345678", "role": "admin"}),
+                               ("/api/logist/stavtrack", "GET", None), ("/api/logist/routing", "GET", None),
+                               ("/api/logist/appinfo", "GET", None), ("/api/logist/amocrm", "GET", None)):
+        assert call(public, path, method, body, logist)[0] == 403, path
+    assert [u["login"] for u in call(public, "/api/logist/logists", token=logist)[1]] == ["olga"]
+    olga_id = call(public, "/api/logist/logists", token=logist)[1][0]["id"]
+    res = call(public, "/api/logist/logists", "POST", {"id": olga_id, "password": "novyi-parol-logista"}, logist)[1]
+    assert res["ok"] and res["token"]
+    # Администратор не работает с заявками и заказами — это кабинет логиста
+    for path in ("/api/logist/orders", "/api/logist/amo/leads", "/api/logist/report.xlsx"):
+        assert call(public, path, token=ctx.admin)[0] == 403, path
+
+    # Администратор видит всех и добавляет второго администратора
+    assert [(u["login"], u["role"]) for u in call(public, "/api/logist/logists", token=ctx.admin)[1]] == [
+        ("admin", "admin"), ("olga", "logist")]
+    assert call(public, "/api/logist/logists", "POST", {"login": "boss", "name": "Начальник", "password": "parol-bossa",
+                                                         "role": "admin"}, ctx.admin)[0] == 200
+    boss = call(public, "/api/logist/login", "POST", {"login": "boss", "password": "parol-bossa"})[1]["token"]
+    assert call(public, "/api/logist/stavtrack", token=boss)[0] == 200
+    # Сменил пароль — файл с первым паролем удаляется
+    admin_id = call(public, "/api/logist/logists", token=ctx.admin)[1][0]["id"]
+    res = call(public, "/api/logist/logists", "POST", {"id": admin_id, "password": "svoi-parol-admina"}, ctx.admin)[1]
+    assert res["ok"] and not admin_file.exists()
+    assert call(public, "/api/logist/me", token=res["token"])[1]["role"] == "admin"
+
+    # Забыли пароль: новый пароль администратору (deploy/admin-password.sh)
+    login, password = ensure_admin(ctx.db, ctx.cfg["data_dir"], reset=True)
+    assert login == "admin" and admin_file.is_file()
+    assert call(public, "/api/logist/login", "POST", {"login": "admin", "password": password})[0] == 200
+    # Старые «логисты-администраторы» после обновления — обычные логисты
+    ctx.db.x("UPDATE logists SET admin=1 WHERE login='olga'")
+    init_db(ctx.db)
+    assert ctx.db.q("SELECT admin FROM logists WHERE login='olga'")[0]["admin"] == 0
+    assert ensure_admin(ctx.db, ctx.cfg["data_dir"]) is None     # администратор уже есть — второй не создаётся
 
 
 def test_weighing_unloads_and_reconciliation(env):
@@ -437,18 +502,39 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         desk.click("nav [data-tab=legs]")
         expect(desk.locator("#legs")).to_contain_text("В рейсе")
         desk.screenshot(path=SHOTS / "legs.png")
-        desk.click("nav [data-tab=drivers]")
-        expect(desk.locator("#drivers tbody tr")).to_have_count(2)
         desk.route("https://tile.openstreetmap.org/**", lambda route: route.abort())
         desk.click("nav [data-tab=map]")
         expect(desk.locator("#fleet")).to_contain_text("Ставтрэк не подключён")
-        desk.click("nav [data-tab=routing]")
-        expect(desk.locator("#routing-state")).to_contain_text("Не задан")
         desk.click("nav [data-tab=orders]")
         desk.click("#calc-route")
         desk.click("dialog button[type=submit]")
         expect(desk.locator("dialog .error")).to_contain_text("Нет координат адреса")
         desk.click("dialog button:has-text('Отмена')")
+        desk.click("nav [data-tab=legs]")
+        expect(desk.locator("#legs thead")).to_contain_text("Топливо, л")
+        # У логиста нет пользователей и подключений — только свой пароль
+        for hidden in ("drivers", "stavtrack", "routing", "amocrm", "driverapp"):
+            expect(desk.locator(f"nav [data-tab={hidden}]")).to_have_count(0)
+        desk.click("nav [data-tab=logists]")
+        expect(desk.locator("main h1")).to_have_text("Мой пароль")
+        expect(desk.locator("#logists tbody tr")).to_have_count(1)
+        expect(desk.locator("#add-logist")).to_have_count(0)
+
+        # Администратор: только пользователи и подключения
+        desk.click("#logout")
+        desk.fill("#l-login", "admin")
+        desk.fill("#l-pass", admin_password(ctx))
+        desk.click("#l-enter")
+        expect(desk.locator("aside .brand small")).to_have_text("Администратор")
+        expect(desk.locator("main h1")).to_have_text("Логисты и менеджеры")
+        expect(desk.locator("nav button")).to_have_text(["Логисты и менеджеры", "Водители", "amoCRM", "Ставтрэк",
+                                                         "Маршруты", "Приложение водителя"])
+        expect(desk.locator("#logists tbody tr")).to_have_count(2)
+        expect(desk.locator("#logists")).to_contain_text("Администратор")
+        desk.click("nav [data-tab=drivers]")
+        expect(desk.locator("#drivers tbody tr")).to_have_count(2)
+        desk.click("nav [data-tab=routing]")
+        expect(desk.locator("#routing-state")).to_contain_text("Не задан")
         desk.click("nav [data-tab=stavtrack]")
         expect(desk.locator("#st-state")).to_have_text("Выключено")
         desk.click("#st-check")
@@ -456,10 +542,7 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         desk.click("#st-setup")
         expect(desk.locator("dialog input[name=url]")).to_have_value("https://wiafleet.online/api")
         desk.click("dialog button:has-text('Отмена')")
-        desk.click("nav [data-tab=legs]")
-        expect(desk.locator("#legs thead")).to_contain_text("Топливо, л")
-        desk.click("nav [data-tab=logists]")
-        expect(desk.locator("#logists")).to_contain_text("Логист-администратор")
+        desk.screenshot(path=SHOTS / "admin.png")
         small = browser.new_page(viewport={"width": 390, "height": 800})
         small.goto(public + "/logist")
         assert small.evaluate("document.documentElement.scrollWidth") <= 390
@@ -482,7 +565,7 @@ def test_orders_payment_and_manager_cabinet(env):
     day = datetime.now().strftime("%Y-%m-%d")
     # Менеджеры и клиенты: частное лицо у Анны, юрлицо у Бориса
     for name, login in (("Анна", "anna"), ("Борис", "boris")):
-        assert call(public, "/api/logist/logists", "POST", {"name": name, "login": login, "password": "parol-menedzhera", "role": "manager"}, logist)[0] == 200
+        assert call(public, "/api/logist/logists", "POST", {"name": name, "login": login, "password": "parol-menedzhera", "role": "manager"}, ctx.admin)[0] == 200
     managers = {m["login"]: m["id"] for m in call(public, "/api/logist/refs", token=logist)[1]["managers"]}
     call(public, "/api/logist/clients", "POST", {"name": "Петров И. И.", "kind": "private", "address": "с. Южное, ул. Мира, 5", "manager_id": managers["anna"]}, logist)
     call(public, "/api/logist/clients", "POST", {"id": 1, "name": "АГЗС Север", "kind": "legal", "legal_name": "ООО «Север»", "manager_id": managers["boris"]}, logist)
@@ -662,13 +745,13 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     token = driver_token(public)
     cfg = {"enabled": True, "url": fake.url, "email": "ves@example.ru", "password": "wrong", "fuel_density": "0,84", "max_age_min": 15}
     # Неверный пароль: понятная ошибка; пароль обратно не отдаётся; менеджеру и водителю настройки закрыты
-    res = call(public, "/api/logist/stavtrack", "POST", cfg, logist)[1]
+    res = call(public, "/api/logist/stavtrack", "POST", cfg, ctx.admin)[1]
     assert res["password_set"] is True and "password" not in res
-    code, res = call(public, "/api/logist/stavtrack/check", token=logist)
+    code, res = call(public, "/api/logist/stavtrack/check", token=ctx.admin)
     assert code == 502 and "логин или пароль" in res["error"]
     assert call(public, "/api/logist/stavtrack", token=token)[0] == 401
-    call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "st-parol"}, logist)
-    check = call(public, "/api/logist/stavtrack/check", token=logist)[1]
+    call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "st-parol"}, ctx.admin)
+    check = call(public, "/api/logist/stavtrack/check", token=ctx.admin)[1]
     assert "vehicles" in check, check
     assert check["vehicles"] == [
         {"plate": "АВ123477", "kind": "trailer", "device": "Бочка АВ1234 77", "device_id": 13, "liters": None, "age_s": check["vehicles"][0]["age_s"],
@@ -701,10 +784,10 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     assert ws[0]["lpg"] == [{"name": "Уровень ППМ", "type": "arbitrary", "value": 63.46, "unit": "%", "src": "прицеп"},
                             {"name": "Плотность", "type": "arbitrary", "value": None, "unit": "", "src": "прицеп"}]
     # В тару входит 400 л топлива: газ пересчитывается, сверка та же
-    call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "", "fuel_in_tare_l": "400"}, logist)
+    call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "", "fuel_in_tare_l": "400"}, ctx.admin)
     [leg] = call(public, "/api/logist/legs" + q, token=logist)[1]
     assert (leg["out_l"], leg["in_l"], leg["scale_l"], leg["diff_l"], leg["status"]) == (25000, 844, 24156, 156, "ok")
-    call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "", "fuel_in_tare_l": "0"}, logist)
+    call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "", "fuel_in_tare_l": "0"}, ctx.admin)
 
     # Карта: машина, её водитель, прицеп, заказы и топливо
     today_l = 24000.0 if (t0 + timedelta(hours=2)).date() == datetime.now().date() else 0      # прогон сразу после полуночи
@@ -729,15 +812,15 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     assert d["orders"] == {"new": 1, "done": 0, "failed": 0}
     assert call(public, "/api/logist/dashboard", token=token)[0] == 401
     assert call(public, "/api/logist/stavtrack/import", token=token)[0] == 401
-    assert call(public, "/api/logist/stavtrack/import", token=logist)[1] == [{"device_id": 12, "name": "Легковая", "plate": ""}]
-    code, res = call(public, "/api/logist/stavtrack/import", "POST", {"items": [{"device_id": 12, "name": "Легковая", "plate": ""}]}, logist)
+    assert call(public, "/api/logist/stavtrack/import", token=ctx.admin)[1] == [{"device_id": 12, "name": "Легковая", "plate": ""}]
+    code, res = call(public, "/api/logist/stavtrack/import", "POST", {"items": [{"device_id": 12, "name": "Легковая", "plate": ""}]}, ctx.admin)
     assert code == 400 and "госномер" in res["error"]
-    res = call(public, "/api/logist/stavtrack/import", "POST", {"items": [{"device_id": 12, "name": "Легковая", "plate": "в222вв26", "kind": ""}]}, logist)[1]
+    res = call(public, "/api/logist/stavtrack/import", "POST", {"items": [{"device_id": 12, "name": "Легковая", "plate": "в222вв26", "kind": ""}]}, ctx.admin)[1]
     assert res == {"ok": True, "added": 1, "linked": 3}      # и машины, найденные по госномеру, привязаны насовсем
     assert {r["plate"]: r["device_id"] for r in ctx.db.q("SELECT * FROM st_links")} == {"В222ВВ26": 12, "Т100АА26": 11, "АВ123477": 13}
     car2 = ctx.db.vehicle("В222ВВ26")
     assert (car2["model"], car2["kind"]) == ("Легковая", "") and ctx.stavtrack.device_for("В222ВВ26")["id"] == 12
-    assert call(public, "/api/logist/stavtrack/import", token=logist)[1] == []
+    assert call(public, "/api/logist/stavtrack/import", token=ctx.admin)[1] == []
     ctx.db.x("DELETE FROM st_links")
     ctx.db.x("DELETE FROM vehicles WHERE plate='В222ВВ26'")
 
@@ -747,8 +830,8 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     last = wait_fuel(ctx, 4)[-1]
     assert last["liters"] is None and "устарели" in last["note"] and "300" in last["note"]
     # Ручная привязка к другому устройству: у него нет ДУТ
-    call(public, "/api/logist/stavtrack/link", "POST", {"plate": "Т100АА26", "device_id": 12}, logist)
-    v = next(x for x in call(public, "/api/logist/stavtrack/check", token=logist)[1]["vehicles"] if x["plate"] == "Т100АА26")
+    call(public, "/api/logist/stavtrack/link", "POST", {"plate": "Т100АА26", "device_id": 12}, ctx.admin)
+    v = next(x for x in call(public, "/api/logist/stavtrack/check", token=ctx.admin)[1]["vehicles"] if x["plate"] == "Т100АА26")
     assert v["device"] == "Легковая" and v["liters"] is None and v["linked"] is True
     # Ставтрэк недоступен: взвешивание всё равно проходит
     fake.server.should_exit = True
@@ -763,7 +846,7 @@ def test_map_in_browser(env):
     ctx, local, public, logist = env
     fake = FakeWiaFleet()
     token = driver_token(public)
-    call(public, "/api/logist/stavtrack", "POST", {"enabled": True, "url": fake.url, "email": "ves@example.ru", "password": "st-parol", "fuel_density": 0.84, "max_age_min": 15}, logist)
+    call(public, "/api/logist/stavtrack", "POST", {"enabled": True, "url": fake.url, "email": "ves@example.ru", "password": "st-parol", "fuel_density": 0.84, "max_age_min": 15}, ctx.admin)
     weigh(ctx, public, token, "arrival", 15000, datetime.now() - timedelta(hours=2))
     call(public, "/api/logist/orders", "POST", {"client_id": 1, "liters": 5000, "driver_id": 1, "day": f"{datetime.now():%Y-%m-%d}", "address": "с. Южное"}, logist)
 
@@ -840,7 +923,11 @@ def test_map_in_browser(env):
         page.click("nav [data-tab=map]")
         expect(page.locator(".car-mark")).to_have_count(1)
 
-        # Загрузка машин из Ставтрэка: окно со списком устройств
+        # Загрузка машин из Ставтрэка (администратор): окно со списком устройств
+        page.click("#logout")
+        page.fill("#l-login", "admin")
+        page.fill("#l-pass", admin_password(ctx))
+        page.click("#l-enter")
         page.click("nav [data-tab=stavtrack]")
         page.click("#st-import")
         expect(page.locator("#st-import-table tbody tr")).to_have_count(1)
@@ -850,9 +937,14 @@ def test_map_in_browser(env):
         page.click("dialog button[type=submit]")
         expect(page.locator("#st-info")).to_contain_text("Загружено машин: 1")
         assert ctx.db.vehicle("В222ВВ26")["model"] == "Легковая"
+        page.click("#logout")
+        page.fill("#l-login", "olga")
+        page.fill("#l-pass", "parol-logista")
+        page.click("#l-enter")
+        expect(page.locator("main h1")).to_have_text("Сводка")
 
         # Яндекс Карты вместо OpenStreetMap: ключ задан — карта рисуется через их программу
-        res = call(public, "/api/logist/routing", "POST", {"map_provider": "yandex", "map_key": "map-key", "mode": "truck", "has_trailer": True}, logist)[1]
+        res = call(public, "/api/logist/routing", "POST", {"map_provider": "yandex", "map_key": "map-key", "mode": "truck", "has_trailer": True}, ctx.admin)[1]
         assert res["map_provider"] == "yandex" and res["map_key_set"] is True and "map_key" not in res
         assert call(public, "/api/logist/me", token=logist)[1]["map"] == {"provider": "yandex", "key": "map-key"}
         asked = []
@@ -873,12 +965,12 @@ def test_map_in_browser(env):
         expect(page.locator("#map .ym-mark")).to_have_count(2)
 
         # Карта Ставтрэка по гео-ссылке: их страница, рядом наш список машин с датчиками
-        code, res = call(public, "/api/logist/routing", "POST", {"map_provider": "stavtrack", "map_url": "javascript:alert(1)"}, logist)
+        code, res = call(public, "/api/logist/routing", "POST", {"map_provider": "stavtrack", "map_url": "javascript:alert(1)"}, ctx.admin)
         assert code == 400 and "https://" in res["error"]
-        code, res = call(public, "/api/logist/routing", "POST", {"map_provider": "stavtrack", "map_url": ""}, logist)
+        code, res = call(public, "/api/logist/routing", "POST", {"map_provider": "stavtrack", "map_url": ""}, ctx.admin)
         assert code == 400 and "гео-ссылку" in res["error"]
         geo = "https://wiafleet.online/geo/abc123"
-        res = call(public, "/api/logist/routing", "POST", {"map_provider": "stavtrack", "map_url": geo, "mode": "truck", "has_trailer": True}, logist)[1]
+        res = call(public, "/api/logist/routing", "POST", {"map_provider": "stavtrack", "map_url": geo, "mode": "truck", "has_trailer": True}, ctx.admin)[1]
         assert res["map_provider"] == "stavtrack" and res["map_url"] == geo
         page.route("https://wiafleet.online/geo/**", lambda route: route.fulfill(content_type="text/html; charset=utf-8", body="<h1>Карта Ставтрэка</h1>"))
         page.reload()
@@ -978,9 +1070,9 @@ def test_addresses_and_route_from_yandex(env):
     c = client({"name": "Южное", "kind": "own", "address": "с. Южное, ул. Мира, 5"})
     assert c["lat"] is None and c["geo_precision"] == "error" and "ключ" in c["geo_text"]
     # Ключи и база: ключи обратно не отдаются; неверный адрес базы — понятная ошибка
-    code, res = call(public, "/api/logist/routing", "POST", {"geocoder_key": "geo-key", "router_key": "route-key", "base_address": "нет такого", "mode": "truck", "has_trailer": True}, logist)
+    code, res = call(public, "/api/logist/routing", "POST", {"geocoder_key": "geo-key", "router_key": "route-key", "base_address": "нет такого", "mode": "truck", "has_trailer": True}, ctx.admin)
     assert code == 400 and "Адрес не найден" in res["error"]
-    res = call(public, "/api/logist/routing", "POST", {"base_address": "база", "mode": "truck", "has_trailer": True}, logist)[1]
+    res = call(public, "/api/logist/routing", "POST", {"base_address": "база", "mode": "truck", "has_trailer": True}, ctx.admin)[1]
     assert (res["base_lat"], res["base_lon"], res["base_precision"]) == (45.0, 42.0, "exact")
     assert res["geocoder_key_set"] and res["router_key_set"] and "geo-key" not in json.dumps(res) and "route-key" not in json.dumps(res)
     assert call(public, "/api/logist/routing", token=token)[0] == 401
@@ -1056,7 +1148,7 @@ def test_dashboard_by_days_and_months(env):
     ctx, local, public, logist = env
     db = ctx.db
     for name, login in (("Анна Ким", "anna"), ("Борис Лев", "boris")):
-        call(public, "/api/logist/logists", "POST", {"name": name, "login": login, "password": "parol-menedzhera", "role": "manager"}, logist)
+        call(public, "/api/logist/logists", "POST", {"name": name, "login": login, "password": "parol-menedzhera", "role": "manager"}, ctx.admin)
     anna_id, boris_id = [r["id"] for r in db.q("SELECT id FROM logists WHERE role='manager' ORDER BY login")]
     call(public, "/api/logist/clients", "POST", {"id": 1, "name": "АГЗС Север", "kind": "legal", "manager_id": anna_id}, logist)
     call(public, "/api/logist/clients", "POST", {"name": "Петров И. И.", "kind": "private", "manager_id": boris_id}, logist)
@@ -1162,14 +1254,14 @@ def test_driver_app_store_info_and_privacy(env):
     for base in (public, local):
         html = urllib.request.urlopen(base + "/privacy").read().decode()
         assert "Политика конфиденциальности" in html and "Firebase" in html and "{company}" not in html
-    info = call(public, "/api/logist/appinfo", token=logist)[1]
+    info = call(public, "/api/logist/appinfo", token=ctx.admin)[1]
     assert info["company"] == "" and info["push"] is True and info["drivers"] == 2 and info["push_drivers"] == 0
-    res = call(public, "/api/logist/appinfo", "POST", {"company": "ООО «Газ <Юг>»", "contact": "ves@example.ru"}, logist)[1]
+    res = call(public, "/api/logist/appinfo", "POST", {"company": "ООО «Газ <Юг>»", "contact": "ves@example.ru"}, ctx.admin)[1]
     assert res["company"] == "ООО «Газ <Юг>»"
     html = urllib.request.urlopen(public + "/privacy").read().decode()
     assert "ООО «Газ &lt;Юг&gt;»" in html and "ves@example.ru" in html and "<Юг>" not in html
     # Менеджер и водитель настраивать не могут
-    call(public, "/api/logist/logists", "POST", {"name": "Анна", "login": "anna", "password": "parol-menedzhera", "role": "manager"}, logist)
+    call(public, "/api/logist/logists", "POST", {"name": "Анна", "login": "anna", "password": "parol-menedzhera", "role": "manager"}, ctx.admin)
     anna = call(public, "/api/logist/login", "POST", {"login": "anna", "password": "parol-menedzhera"})[1]["token"]
     assert call(public, "/api/logist/appinfo", token=anna)[0] == 403
     assert call(public, "/api/logist/appinfo", "POST", {"company": "x"}, driver_token(public))[0] == 401
@@ -1179,8 +1271,8 @@ def test_driver_app_store_info_and_privacy(env):
         browser = pw.chromium.launch()
         page = browser.new_page()
         page.goto(public + "/logist")
-        page.fill("#l-login", "olga")
-        page.fill("#l-pass", "parol-logista")
+        page.fill("#l-login", "admin")
+        page.fill("#l-pass", admin_password(ctx))
         page.click("#l-enter")
         page.click("nav [data-tab=driverapp]")
         expect(page.locator("#app-info")).to_contain_text("ООО «Газ <Юг>»")

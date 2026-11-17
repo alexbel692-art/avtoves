@@ -279,7 +279,41 @@ def init_db(db):
                 if col not in have:
                     db.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
         db.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_drivers_login ON drivers(login) WHERE login<>''")
+        # Права администратора — только у отдельного пользователя-администратора, не у логистов
+        db.conn.execute("UPDATE logists SET admin=0 WHERE role<>'admin' AND admin<>0")
         db.conn.commit()
+
+
+ADMIN_FILE = "admin-password.txt"
+
+
+def ensure_admin(db, data_dir, reset: bool = False) -> tuple[str, str] | None:
+    """Администратор кабинета создаётся сам при первом запуске: логин admin и случайный пароль.
+    Пароль записывается в файл admin-password.txt в папке данных (его выводит установщик).
+    reset=True — новый пароль для администратора (sudo bash deploy/admin-password.sh)."""
+    rows = db.q("SELECT * FROM logists WHERE role='admin' AND active=1 ORDER BY id")
+    if rows and not reset:
+        return None
+    password = secrets.token_urlsafe(9)
+    if rows:
+        login = rows[0]["login"]
+        db.x("UPDATE logists SET pass_hash=? WHERE id=?", (st.hash_password(password), rows[0]["id"]))
+    else:
+        login, n = "admin", 1
+        while db.q("SELECT 1 FROM logists WHERE login=?", (login,)):
+            n += 1
+            login = f"admin{n}"
+        db.x("INSERT INTO logists(login,name,pass_hash,admin,role) VALUES(?,?,?,1,'admin')",
+             (login, "Администратор", st.hash_password(password)))
+    f = Path(data_dir) / ADMIN_FILE
+    f.write_text(f"Кабинет АвтоВес (/logist), администратор\nЛогин: {login}\nПароль: {password}\n"
+                 "Смените пароль после первого входа: «Пользователи → Логисты и менеджеры».\n", encoding="utf-8")
+    try:
+        f.chmod(0o600)
+    except OSError:
+        pass
+    logging.getLogger("logist").warning("Администратор кабинета: логин %s, пароль в файле %s", login, f)
+    return login, password
 
 
 # ---------------------------------------------------------------- сверка с весами
@@ -349,6 +383,8 @@ def legs(db, density: float, tol_pct: float, tol_l: float, date_from: str | None
 def build_routes(ctx, public: bool) -> list[Route]:
     db = ctx.db
     init_db(db)
+    ensure_admin(db, ctx.cfg["data_dir"])
+    admin_file = Path(ctx.cfg["data_dir"]) / ADMIN_FILE
     tokens = Tokens(ctx.cfg["data_dir"])
     snap_dir = Path(ctx.cfg["data_dir"]) / "snapshots"
     tile_dir = Path(ctx.cfg["data_dir"]) / "tiles"
@@ -458,6 +494,13 @@ def build_routes(ctx, public: bool) -> list[Route]:
     def staff(request: Request, token: str | None = None) -> dict:
         """Логист или менеджер. Менеджер видит только своих клиентов: оплаты и счета."""
         return current(request, "l", "logists", token)
+
+    def worker(request: Request, token: str | None = None) -> dict:
+        """Логист или менеджер — рабочие данные. Администратору они не нужны: у него пользователи и подключения."""
+        u = staff(request, token)
+        if u["role"] == "admin":
+            raise Bad("Администратор не работает с заявками и выгрузками: войдите как логист", 403)
+        return u
 
     def logist_of(request: Request) -> dict:
         u = staff(request)
@@ -742,9 +785,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def logist_status(_):
-        # Первого логиста можно создать только из локальной сети весовой
-        first = not db.q("SELECT 1 FROM logists LIMIT 1")
-        return JSONResponse({"setup": first and not public, "empty": first, "version": __version__})
+        # Где взять пароль администратора — подсказка только в локальной сети весовой
+        hint = str(admin_file) if not public and admin_file.is_file() else ""
+        return JSONResponse({"setup": False, "empty": False, "admin_file": hint, "version": __version__})
 
     def new_password(value) -> str:
         if not isinstance(value, str) or len(value) < 8:
@@ -753,14 +796,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def logist_setup(request: Request):
-        if public or db.q("SELECT 1 FROM logists LIMIT 1"):
-            raise Bad("Первый логист уже создан", 403)
-        b = await body(request)
-        login = text(b.get("login"), "Логин", 60).casefold()
-        lid = db.x("INSERT INTO logists(login,name,pass_hash,admin) VALUES(?,?,?,1)",
-                   (login, text(b.get("name"), "Имя", 120, required=False), new_password(b.get("password"))))
-        row = db.q("SELECT * FROM logists WHERE id=?", (lid,))[0]
-        return JSONResponse({"token": tokens.make("l", lid, row["pass_hash"], LOGIST_DAYS)})
+        raise Bad("Администратор создаётся автоматически; пользователей добавляет он", 403)
 
     @handler
     async def logist_login(request: Request):
@@ -770,8 +806,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
     @handler
     async def logist_me(request: Request):
         u = staff(request)
-        return JSONResponse({"login": u["login"], "name": u["name"], "admin": bool(u["admin"]), "role": u["role"],
-                             "notices": notice_count(own(u)), "tolerance": lcfg(), "push": pusher.ready(),
+        return JSONResponse({"login": u["login"], "name": u["name"], "admin": u["role"] == "admin", "role": u["role"],
+                             "notices": notice_count(own(u)) if u["role"] != "admin" else 0, "tolerance": lcfg(), "push": pusher.ready(),
                              "map": map_settings() if u["role"] == "logist" else None})
 
     def map_settings() -> dict:
@@ -786,7 +822,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
     async def dashboard(request: Request):
         """Сводка: продажи (литры) по дням выбранного месяца и по месяцам за год, сравнение с прошлым месяцем,
         клиенты, водители, менеджеры, типы клиентов. Менеджер видит только своих клиентов."""
-        u = staff(request)
+        u = worker(request)
         owner = own(u)
         mine, margs = ("", ()) if owner is None else (" AND c.manager_id=?", (owner,))
         now = datetime.now()
@@ -911,7 +947,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def logist_report(request: Request):
-        return JSONResponse(report(request, own(staff(request))))
+        return JSONResponse(report(request, own(worker(request))))
 
     @handler
     async def logist_refs(request: Request):
@@ -933,7 +969,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def logist_xlsx(request: Request):
-        owner = own(staff(request))
+        owner = own(worker(request))
         from openpyxl import Workbook
         from openpyxl.styles import Font
         data = report(request, owner)
@@ -1059,7 +1095,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
     # ---- водители: логин и пароль для приложения
     @handler
     async def driver_save(request: Request):
-        logist_of(request)
+        admin_of(request)
         b = await body(request)
         name = text(b.get("name"), "ФИО", 120)
         login = text(b.get("login"), "Логин", 60).casefold()
@@ -1084,14 +1120,16 @@ def build_routes(ctx, public: bool) -> list[Route]:
     @handler
     async def logists_api(request: Request):
         u = staff(request)
+        is_admin = u["role"] == "admin"
         if request.method == "GET":
-            if u["role"] == "manager":
+            if not is_admin:
                 return JSONResponse(db.q("SELECT id,login,name,admin,active,role FROM logists WHERE id=?", (u["id"],)))
-            return JSONResponse(db.q("SELECT id,login,name,admin,active,role FROM logists ORDER BY role, login"))
+            return JSONResponse(db.q("SELECT id,login,name,admin,active,role FROM logists "
+                                     "ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'logist' THEN 1 ELSE 2 END, login"))
         b = await body(request)
         lid = b.get("id")
-        if not u["admin"] and lid != u["id"]:
-            raise Bad("Других логистов может менять только администратор", 403)
+        if not is_admin and lid != u["id"]:
+            raise Bad("Пользователей добавляет и меняет только администратор", 403)
         if lid:
             if not db.q("SELECT 1 FROM logists WHERE id=?", (lid,)):
                 raise Bad("Логист не найден", 404)
@@ -1099,9 +1137,12 @@ def build_routes(ctx, public: bool) -> list[Route]:
                 db.x("UPDATE logists SET name=? WHERE id=?", (text(b["name"], "Имя", 120, False), lid))
             if b.get("password"):
                 db.x("UPDATE logists SET pass_hash=? WHERE id=?", (new_password(b["password"]), lid))
-            if "active" in b and u["admin"] and lid != u["id"]:
+            if "active" in b and is_admin and lid != u["id"]:
                 db.x("UPDATE logists SET active=? WHERE id=?", (int(bool(b["active"])), lid))
             out = {"ok": True}
+            if b.get("password") and admin_file.is_file() and \
+                    db.q("SELECT 1 FROM logists WHERE id=? AND role='admin'", (lid,)):
+                admin_file.unlink(missing_ok=True)     # пароль сменили — старый файл больше не нужен
             if lid == u["id"] and b.get("password"):
                 row = db.q("SELECT * FROM logists WHERE id=?", (lid,))[0]
                 out["token"] = tokens.make("l", lid, row["pass_hash"], LOGIST_DAYS)
@@ -1109,10 +1150,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
         login = text(b.get("login"), "Логин", 60).casefold()
         if db.q("SELECT 1 FROM logists WHERE login=?", (login,)):
             raise Bad("Такой логин уже есть", 409)
-        role = "manager" if b.get("role") == "manager" else "logist"
+        role = b.get("role") if b.get("role") in ("manager", "admin") else "logist"
         db.x("INSERT INTO logists(login,name,pass_hash,admin,role) VALUES(?,?,?,?,?)",
-             (login, text(b.get("name"), "Имя", 120, False), new_password(b.get("password")),
-              int(bool(b.get("admin")) and role == "logist"), role))
+             (login, text(b.get("name"), "Имя", 120, False), new_password(b.get("password")), int(role == "admin"), role))
         return JSONResponse({"ok": True})
 
     # ---- уведомления
@@ -1141,7 +1181,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def notices(request: Request):
-        u = staff(request)
+        u = worker(request)
         owner = own(u)
         mine, margs = ("", ()) if owner is None else (" AND c.manager_id=?", (owner,))
         status = "done" if request.query_params.get("invoices") == "done" else "pending"
@@ -1173,7 +1213,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def paid_mark(request: Request):
-        u = staff(request)
+        u = worker(request)
         uid = request.path_params["uid"]
         manager_owns(u, uid)
         with db.lock:
@@ -1541,9 +1581,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     # ---- Ставтрэк: топливо по ДУТ
     def admin_of(request: Request) -> dict:
-        u = logist_of(request)
-        if not u["admin"]:
-            raise Bad("Доступно только логисту-администратору", 403)
+        u = staff(request)
+        if u["role"] != "admin":
+            raise Bad("Доступно только администратору", 403)
         return u
 
     @handler
@@ -1808,7 +1848,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     @handler
     async def logist_photo(request: Request):
-        u = staff(request, request.query_params.get("t", ""))
+        u = worker(request, request.query_params.get("t", ""))
         if u["role"] != "logist":
             raise Bad("Доступно только логисту", 403)
         rel = request.path_params["path"]
@@ -1823,7 +1863,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
         return mark
 
     async def invoice_mark(request: Request, action: str):
-        u = staff(request)
+        u = worker(request)
         uid = request.path_params["uid"]
         manager_owns(u, uid)
         if action == "done":
