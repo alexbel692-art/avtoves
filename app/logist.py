@@ -1568,7 +1568,29 @@ def build_routes(ctx, public: bool) -> list[Route]:
                     pass
             if cur.get("token") != amo.settings()["token"] or cur.get("domain") != amo.settings()["domain"]:
                 amo.save({"last_error": ""})
-        return JSONResponse(amo.public())
+            if b.get("new_hook_secret"):
+                amo.save({"hook_secret": ""})      # старый адрес вебхука перестанет работать
+        return JSONResponse(amo.public() | {"hook_url": hook_url(request)})
+
+    def hook_url(request: Request) -> str:
+        """Адрес вебхука для amoCRM: тот же сайт, через который администратор открыл кабинет."""
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+        return f"{proto}://{host}/api/amocrm/hook/{amo.hook_secret()}"
+
+    @handler
+    async def amo_hook(request: Request):
+        """Вебхук amoCRM: сделка добавлена, изменена, сменила этап или удалена."""
+        if not amo.check_secret(request.path_params["secret"]):
+            raise Bad("Не найдено", 404)
+        raw = await request.body()
+        if len(raw) > 5_000_000:
+            raise Bad("Слишком большой запрос", 413)
+        try:
+            n = amo.hook(raw)
+        except AmoError as ex:
+            raise Bad(str(ex), 403) from ex
+        return JSONResponse({"ok": True, "leads": n})
 
     @handler
     async def amo_meta_api(request: Request):
@@ -1921,6 +1943,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/amo/sync", amo_sync_api, methods=["POST"]),
         Route("/api/logist/amocrm", amo_settings_api, methods=["GET", "POST"]),
         Route("/api/logist/amocrm/meta", amo_meta_api),
+        Route("/api/amocrm/hook/{secret}", amo_hook, methods=["POST"]),
         Route("/api/logist/weighings", weighings_api),
         Route("/api/logist/map", map_api),
         Route("/api/logist/stavtrack", stavtrack_api, methods=["GET", "POST"]),

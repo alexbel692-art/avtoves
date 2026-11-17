@@ -1,16 +1,25 @@
 """amoCRM: заявки на доставку газа для кабинета логиста.
 
-Сервер сам забирает из amoCRM сделки с датой доставки — как лист «Сделки» в Google-таблице логиста —
+Сервер забирает из amoCRM сделки с датой доставки — как лист «Сделки» в Google-таблице логиста —
 и раскладывает их по дням и базам. Логист выбирает водителя, заявка становится заказом в приложении водителя.
+
+Данные приходят двумя путями, как в личном кабинете клиента (gaslk):
+- вебхук: amoCRM сама присылает POST (form-urlencoded: leads[update][0][id]=…, leads[delete][0][id]=…)
+  на адрес /api/amocrm/hook/<секрет> при каждом изменении сделки — заявка обновляется сразу;
+- обмен по расписанию (раз в несколько минут) — страховка, если вебхук не дошёл.
+По id из вебхука сделка перечитывается через API целиком: в самом вебхуке нет контакта и телефона,
+а даты приходят строкой.
 
 Доступ — «долгосрочный токен» интеграции amoCRM (amoМаркет → Создать интеграцию → Ключи и доступы).
 API v4: GET /api/v4/leads, /leads/custom_fields, /leads/pipelines, /contacts, /users.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import re
+import secrets
 import threading
 import time
 import urllib.error
@@ -40,6 +49,8 @@ GUESS = {
     "conditions": ["особые услов", "услови", "комментарий логист", "примечан"],
     "address": ["адрес"],
 }
+# Поля сделки в amoCRM компании (их же использует личный кабинет клиента gaslk): берутся первыми, если есть
+KNOWN_FIELDS = {"day": 825487, "address": 825393, "liters": 828019}
 # База по району, если в сделке она не указана (таблица «Лист2» логиста)
 BASE_BY_DISTRICT = {
     "Балашиха г.о.": "Мотяково", "Богородский г.о.": "Мотяково", "Бронницы г.о.": "Мотяково",
@@ -57,7 +68,8 @@ BASE_BY_DISTRICT = {
     "Щелковский": "Мотяково", "Ярославская область": "Мотяково",
 }
 DEFAULTS = {"enabled": False, "domain": "", "token": "", "pipeline_id": 0, "interval_min": 5, "days_back": 45,
-            "fields": {}, "cursor": 0, "last_sync": "", "last_error": "", "last_count": 0}
+            "fields": {}, "cursor": 0, "last_sync": "", "last_error": "", "last_count": 0,
+            "hook_secret": "", "last_hook": "", "hook_count": 0}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS amo_leads (
@@ -139,9 +151,54 @@ def field_text(cf: dict | None) -> str:
     return ", ".join(" ".join(str(v).split()) for v in vals)
 
 
+def parse_form(raw: bytes) -> dict:
+    """Тело вебхука amoCRM (как formDataToObject в gaslk): «leads[update][0][id]=5» → {"leads": {"update": [{"id": "5"}]}}."""
+    result: dict = {}
+    for key, value in urllib.parse.parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True):
+        keys = [k for k in re.split(r"\]\[|\[|\]", key) if k != ""]
+        cur = result
+        for i, k in enumerate(keys):
+            if isinstance(cur, list):
+                idx = int(k) if k.isdigit() else len(cur)
+                while len(cur) <= idx:
+                    cur.append(None)
+                if i == len(keys) - 1:
+                    cur[idx] = value
+                else:
+                    if cur[idx] is None:
+                        cur[idx] = [] if keys[i + 1].isdigit() else {}
+                    cur = cur[idx]
+            else:
+                if i == len(keys) - 1:
+                    cur[k] = value
+                else:
+                    if not isinstance(cur.get(k), (dict, list)):
+                        cur[k] = [] if keys[i + 1].isdigit() else {}
+                    cur = cur[k]
+    return result
+
+
+def hook_leads(payload: dict) -> tuple[set[int], set[int]]:
+    """Какие сделки изменились и какие удалены (события add, update, status, responsible, restore, delete)."""
+    changed, deleted = set(), set()
+    leads = payload.get("leads") if isinstance(payload.get("leads"), dict) else {}
+    for event, items in leads.items():
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and str(item.get("id", "")).isdigit():
+                (deleted if event == "delete" else changed).add(int(item["id"]))
+    return changed - deleted, deleted
+
+
 def guess_fields(fields: list[dict]) -> dict:
     out, used = {}, set()
+    ids = {f["id"] for f in fields}
+    for role, fid in KNOWN_FIELDS.items():
+        if fid in ids:
+            out[role] = fid
+            used.add(fid)
     for role, words in GUESS.items():
+        if role in out:
+            continue
         for w in words:
             hit = next((f for f in fields if f["id"] not in used and w in f["name"].casefold()
                         and (role != "day" or f["type"] in ("date", "date_time", "birthday"))), None)
@@ -163,6 +220,11 @@ class AmoCRM:
         self.on_lead = None                   # вызывается для каждой изменившейся заявки с заказом
         self.thread = None
         self.wake = threading.Event()
+        self.hook_thread = None
+        self.hook_wake = threading.Event()
+        self.hook_queue: dict[int, bool] = {}   # id сделки → удалена
+        self.hook_lock = threading.Lock()
+        self.cache: dict[str, tuple[float, dict]] = {}
 
     # ---- настройки (ключ доступа наружу не отдаётся)
     def settings(self) -> dict:
@@ -182,9 +244,16 @@ class AmoCRM:
                   (json.dumps(cur, ensure_ascii=False),))
         self.wake.set()
 
+    def hook_secret(self) -> str:
+        s = self.settings()
+        if not s["hook_secret"]:
+            s["hook_secret"] = secrets.token_urlsafe(18)
+            self._mark(hook_secret=s["hook_secret"])
+        return s["hook_secret"]
+
     def public(self) -> dict:
         s = self.settings()
-        return ({k: v for k, v in s.items() if k not in ("token", "cursor")}
+        return ({k: v for k, v in s.items() if k not in ("token", "cursor", "hook_secret")}
                 | {"token_set": bool(s["token"]), "ready": self.ready(), "roles": ROLES})
 
     def ready(self) -> bool:
@@ -270,10 +339,27 @@ class AmoCRM:
         leads = list(self._pages("leads", "leads", params, s))
         if not leads:
             return {"count": 0, "changed": 0, "cursor": since}
-        statuses = {}
-        for p in self.meta(s)["pipelines"]:
-            statuses.update(p["statuses"])
-        users = {u["id"]: u.get("name") or "" for u in self._pages("users", "users", [], s, 20)}
+        changed, cursor = self._process(leads, s, fmap)
+        return {"count": len(leads), "changed": changed, "cursor": max(cursor, since)}
+
+    def _cached(self, name: str, load, ttl: float = 600) -> dict:
+        hit = self.cache.get(name)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        val = load()
+        self.cache[name] = (time.time(), val)
+        return val
+
+    def _process(self, leads: list[dict], s: dict, fmap: dict) -> tuple[int, int]:
+        """Сделки из API → заявки: подтягивает контакты (имя, телефоны), ответственных и этапы."""
+        def load_statuses():
+            out = {}
+            for p in self._pages("leads/pipelines", "pipelines", [], s, 5):
+                for st_ in (p.get("_embedded") or {}).get("statuses") or []:
+                    out[st_["id"]] = st_.get("name") or ""
+            return out
+        statuses = self._cached("statuses", load_statuses)
+        users = self._cached("users", lambda: {u["id"]: u.get("name") or "" for u in self._pages("users", "users", [], s, 20)})
         contact_ids = []
         for lead in leads:
             cs = (lead.get("_embedded") or {}).get("contacts") or []
@@ -290,13 +376,83 @@ class AmoCRM:
                     if cf.get("field_code") == "PHONE":
                         phones += [" ".join(str(v.get("value")).split()) for v in cf.get("values") or [] if v.get("value")]
                 contacts[c["id"]] = {"name": " ".join(str(c.get("name") or "").split()), "phone": ", ".join(phones)}
-        changed = 0
-        cursor = since
+        changed = cursor = 0
         for lead in leads:
             cursor = max(cursor, int(lead.get("updated_at") or 0))
+            if s.get("pipeline_id") and lead.get("pipeline_id") != int(s["pipeline_id"]):
+                lead = {**lead, "is_deleted": True}      # сделку увели в другую воронку — это больше не заявка
             if self._store(lead, fmap, statuses, users, contacts):
                 changed += 1
-        return {"count": len(leads), "changed": changed, "cursor": cursor}
+        return changed, cursor
+
+    # ---- вебхук: amoCRM сообщает об изменении сделки сразу
+    def check_secret(self, secret: str) -> bool:
+        good = self.settings()["hook_secret"]
+        return bool(good) and hmac.compare_digest(str(secret).encode(), good.encode())
+
+    def hook(self, raw: bytes) -> int:
+        """Принимает вебхук и сразу отвечает: сделки перечитываются в отдельном потоке
+        (amoCRM ждёт ответа пару секунд и отключает вебхук, если он часто не отвечает)."""
+        payload = parse_form(raw)
+        sub = str((payload.get("account") or {}).get("subdomain") or "") if isinstance(payload.get("account"), dict) else ""
+        domain = self.settings()["domain"]
+        if sub and domain and not domain.startswith(sub + "."):
+            raise AmoError("Вебхук от другого аккаунта amoCRM")
+        changed, deleted = hook_leads(payload)
+        with self.hook_lock:
+            for lid in changed:
+                self.hook_queue.setdefault(lid, False)
+            for lid in deleted:
+                self.hook_queue[lid] = True
+        self._mark(last_hook=datetime.now().isoformat(timespec="seconds"),
+                   hook_count=int(self.settings().get("hook_count") or 0) + 1)
+        if changed or deleted:
+            self.hook_wake.set()
+        return len(changed) + len(deleted)
+
+    def process_hooks(self) -> int:
+        """Перечитывает сделки из очереди вебхука. Возвращает, сколько заявок изменилось."""
+        with self.hook_lock:
+            queue, self.hook_queue = self.hook_queue, {}
+        if not queue or not self.ready():
+            return 0
+        with self.lock:
+            s = self.settings()
+            fmap = {k: int(v) for k, v in (s.get("fields") or {}).items() if v}
+            changed = 0
+            for lid in [k for k, gone in queue.items() if gone]:
+                if self._forget(lid):
+                    changed += 1
+            ids = [k for k, gone in queue.items() if not gone]
+            try:
+                for i in range(0, len(ids), 50):
+                    chunk = ids[i:i + 50]
+                    leads = list(self._pages("leads", "leads", [("with", "contacts")] + [("filter[id][]", x) for x in chunk], s, 5))
+                    found = {lead["id"] for lead in leads}
+                    changed += self._process(leads, s, fmap)[0]
+                    for lid in set(chunk) - found:       # сделки нет (удалена или недоступна)
+                        if self._forget(lid):
+                            changed += 1
+            except AmoError as ex:
+                with self.hook_lock:                     # не потерять: повторим при следующей попытке
+                    for lid in ids:
+                        self.hook_queue.setdefault(lid, False)
+                self._mark(last_error=str(ex))
+                raise
+            return changed
+
+    def _forget(self, lead_id: int) -> bool:
+        old = self.db.q("SELECT * FROM amo_leads WHERE lead_id=?", (lead_id,))
+        if not old or old[0]["lost"]:
+            return False
+        self.db.x("UPDATE amo_leads SET lost=1, synced=? WHERE lead_id=?",
+                  (datetime.now().isoformat(timespec="seconds"), lead_id))
+        if old[0]["order_id"] and self.on_lead:
+            try:
+                self.on_lead(lead_id)
+            except Exception:  # noqa: BLE001
+                log.exception("Не удалось снять заказ по удалённой сделке %s", lead_id)
+        return True
 
     def _store(self, lead: dict, fmap: dict, statuses: dict, users: dict, contacts: dict) -> bool:
         by_id = {cf.get("field_id"): cf for cf in lead.get("custom_fields_values") or []}
@@ -348,6 +504,20 @@ class AmoCRM:
             return
         self.thread = threading.Thread(target=self._loop, name="amocrm", daemon=True)
         self.thread.start()
+        self.hook_thread = threading.Thread(target=self._hook_loop, name="amocrm-hook", daemon=True)
+        self.hook_thread.start()
+
+    def _hook_loop(self):
+        while True:
+            self.hook_wake.wait(60)
+            self.hook_wake.clear()
+            time.sleep(1)            # amoCRM шлёт несколько событий подряд — собираем их в один запрос
+            try:
+                self.process_hooks()
+            except AmoError as ex:
+                log.warning("amoCRM, вебхук: %s", ex)
+            except Exception:  # noqa: BLE001
+                log.exception("amoCRM, вебхук: сбой")
 
     def _loop(self):
         while True:

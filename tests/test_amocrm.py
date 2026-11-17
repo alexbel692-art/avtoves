@@ -7,6 +7,7 @@ import json
 import time
 import urllib.error
 import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 
 from test_v2 import SHOTS, admin_password, call, driver_token, env, wait_push  # noqa: F401
@@ -96,7 +97,9 @@ class FakeAmo:
                 {"field_code": "PHONE", "values": [{"value": p} for p in self.contacts[i][1]]}]} for i in ids], page, limit)
         elif path == "leads":
             since = int(q.get("filter[updated_at][from]", ["0"])[0])
-            items = sorted((x for x in self.leads.values() if x["updated_at"] >= since), key=lambda x: x["updated_at"])
+            ids = {int(x) for x in q.get("filter[id][]", [])}
+            items = sorted((x for x in self.leads.values() if x["updated_at"] >= since and (not ids or x["id"] in ids)),
+                           key=lambda x: x["updated_at"])
             data = self.page("leads", json.loads(json.dumps(items)), page, limit)
         else:
             raise urllib.error.HTTPError(req.full_url, 404, "Not found", {}, io.BytesIO(b""))
@@ -300,3 +303,97 @@ def test_amocrm_requests_in_browser(env):
     assert errors == []
     orders = ctx.db.q("SELECT driver_id, liters, amo_lead_id FROM orders ORDER BY id")
     assert [(o["driver_id"], o["liters"], o["amo_lead_id"]) for o in orders] == [(1, 4000.0, 31865331), (2, 2000.0, 31611863)]
+
+
+def hook(public, secret, body: str):
+    req = urllib.request.Request(f"{public}/api/amocrm/hook/{secret}", method="POST", data=body.encode(),
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as err:
+        return err.code, json.loads(err.read())
+
+
+def wait_for(check, what):
+    for _ in range(100):
+        if check():
+            return
+        time.sleep(0.05)
+    raise AssertionError(what)
+
+
+def test_parse_amocrm_webhook():
+    from app.amocrm import hook_leads, parse_form
+    body = ("leads%5Bupdate%5D%5B0%5D%5Bid%5D=31865331&leads%5Bupdate%5D%5B0%5D%5Bstatus_id%5D=45097963"
+            "&leads%5Bupdate%5D%5B0%5D%5Bcustom_fields%5D%5B0%5D%5Bid%5D=828019"
+            "&leads%5Bupdate%5D%5B0%5D%5Bcustom_fields%5D%5B0%5D%5Bvalues%5D%5B0%5D%5Bvalue%5D=4500"
+            "&leads%5Bstatus%5D%5B0%5D%5Bid%5D=31611863&leads%5Bdelete%5D%5B0%5D%5Bid%5D=31603247"
+            "&account%5Bsubdomain%5D=rosavtonomg")
+    p = parse_form(body.encode())
+    assert p["leads"]["update"][0]["custom_fields"][0]["values"][0]["value"] == "4500"
+    assert p["account"]["subdomain"] == "rosavtonomg"
+    assert hook_leads(p) == ({31865331, 31611863}, {31603247})
+    assert hook_leads(parse_form(b"contacts[update][0][id]=5")) == (set(), set())
+    # Поля amoCRM компании (как в gaslk) узнаются по id, даже если названы иначе
+    from app.amocrm import guess_fields
+    g = guess_fields([{"id": 825487, "name": "Желаемая дата", "type": "date"}, {"id": 828019, "name": "Количество", "type": "numeric"},
+                      {"id": 825393, "name": "Куда везти", "type": "text"}, {"id": 1, "name": "Район", "type": "select"}])
+    assert g == {"day": 825487, "liters": 828019, "address": 825393, "district": 1}
+
+
+def test_amocrm_webhook_updates_requests_at_once(env):
+    ctx, local, public, logist = env
+    day = datetime.now().strftime("%Y-%m-%d")
+    fake = FakeAmo(day)
+    ctx.amocrm.opener = fake
+    s = call(public, "/api/logist/amocrm", "POST", {"domain": "rosavtonomg", "token": TOKEN, "enabled": True}, ctx.admin)[1]
+    url = s["hook_url"]
+    assert url.startswith(public + "/api/amocrm/hook/") and "hook_secret" not in s
+    secret = url.rsplit("/", 1)[1]
+    assert call(public, "/api/logist/amocrm", token=logist)[0] == 403        # адрес с секретом — только администратору
+    assert call(public, "/api/amo/sync", "POST", token=logist)[0] == 404
+    assert call(public, "/api/logist/amo/sync", "POST", token=logist)[0] == 200
+    call(public, "/api/app/push-token", "POST", {"token": "phone-ivanov"}, driver_token(public))
+    assert call(public, "/api/logist/amo/assign", "POST", {"lead_id": 31865331, "driver_id": 1}, logist)[0] == 200
+
+    # Чужой или пустой секрет и другой аккаунт amoCRM — отказ
+    assert hook(public, "wrong", "leads[update][0][id]=31865331")[0] == 404
+    assert hook(public, secret, "leads[update][0][id]=31865331&account[subdomain]=other")[0] == 403
+
+    # Сделку изменили — вебхук, и заявка с заказом водителя обновляются без ожидания обмена
+    fake.update(31865331, fields={F_LITERS: "4500"})
+    code, res = hook(public, secret, "leads[update][0][id]=31865331&leads[update][0][status_id]=142000"
+                                     "&account[subdomain]=rosavtonomg")
+    assert (code, res) == (200, {"ok": True, "leads": 1})
+
+    def lead(lid):
+        return next((x for x in call(public, f"/api/logist/amo/leads?day={day}", token=logist)[1]["leads"]
+                     if x["lead_id"] == lid), None)
+    wait_for(lambda: lead(31865331)["liters"] == 4500.0, "литры из вебхука")
+    wait_for(lambda: ctx.db.q("SELECT liters FROM orders")[0]["liters"] == 4500.0, "заказ водителя обновлён")
+    wait_push(ctx, 2)
+    assert ctx.pusher.sent[1][1] == "Заказ изменён"
+
+    # Новая сделка — сразу на доске
+    fake.leads[31999999] = FakeAmo.lead(31999999, int(datetime.strptime(day, "%Y-%m-%d").replace(hour=12).timestamp()),
+                                        "Клинский", "Ленинградское шоссе", "", "6000", "Первый залив!", 501, 12,
+                                        int(time.time()))
+    assert hook(public, secret, "leads[add][0][id]=31999999&account[subdomain]=rosavtonomg")[0] == 200
+    wait_for(lambda: lead(31999999) is not None, "новая сделка из вебхука")
+    assert (lead(31999999)["base"], lead(31999999)["conditions"]) == ("Онуфриево", "Первый залив!")
+
+    # Сделку удалили — заявка пропадает, заказ у водителя снимается
+    del fake.leads[31865331]
+    assert hook(public, secret, "leads[delete][0][id]=31865331&account[subdomain]=rosavtonomg")[0] == 200
+    wait_for(lambda: lead(31865331) is None, "удалённая сделка")
+    wait_push(ctx, 3)
+    assert ctx.pusher.sent[2][1] == "Заказ отменён"
+    st = call(public, "/api/logist/amocrm", token=ctx.admin)[1]
+    assert st["hook_count"] == 3 and st["last_hook"]
+
+    # Новый адрес: старый перестаёт работать
+    s2 = call(public, "/api/logist/amocrm", "POST", {"domain": "rosavtonomg", "enabled": True, "new_hook_secret": True},
+              ctx.admin)[1]
+    assert s2["hook_url"] != url
+    assert hook(public, secret, "leads[update][0][id]=31611863")[0] == 404
