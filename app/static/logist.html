@@ -145,7 +145,11 @@ details.tableview summary { cursor:pointer; color:var(--muted); }
 #requests tr.drv td:first-child { box-shadow:inset 6px 0 0 var(--drv); }
 #requests tr.drv select { border-color:var(--drv); border-width:2px; font-weight:600; }
 .drv-legend { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 12px; }
-.drv-legend span { display:inline-flex; align-items:center; gap:7px; background:var(--paper); border:1px solid var(--line); border-radius:20px; padding:4px 12px 4px 6px; font-size:14px; }
+.drv-legend button { display:inline-flex; align-items:center; gap:7px; background:var(--paper); border:1px solid var(--line); border-radius:20px; padding:4px 12px 4px 6px; font-size:14px; font-weight:400; min-height:34px; }
+.drv-legend button:hover { border-color:var(--drv, var(--ink)); }
+.drv-legend button[aria-pressed="true"] { background:color-mix(in srgb, var(--drv) 16%, #fff); border:2px solid var(--drv); box-shadow:0 1px 4px rgba(21,32,43,.15); }
+.drv-legend #drv-all { padding:4px 12px; font-weight:600; }
+.drv-picked { margin:-2px 0 12px; padding:9px 14px; border-left:6px solid var(--drv); background:color-mix(in srgb, var(--drv) 10%, #fff); border-radius:8px; }
 .drv-legend i, .swatch { width:16px; height:16px; border-radius:50%; background:var(--drv); display:inline-block; flex:none; }
 .seal { font-size:13px; color:var(--ink); }
 .pick-list { max-height:50vh; overflow:auto; border:1px solid var(--line); border-radius:8px; }
@@ -302,7 +306,7 @@ async function render() {
         ? [['', [['home', 'Сводка'], ['notices', badge], ['report', 'Выгрузки']]], ['Настройки', [['logists', 'Мой пароль']]]]
         : [['', [['home', 'Сводка'], ['notices', badge], ['requests', 'Заявки amoCRM'], ['map', 'Карта'], ['orders', 'Заказы']]],
           ['Учёт', [['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания']]],
-          ['Справочники', [['clients', 'Клиенты']]], ['Настройки', [['logists', 'Мой пароль']]]];
+          ['Настройки', [['logists', 'Мой пароль']]]];      // раздел «Клиенты» пока скрыт
     const tabs = groups.flatMap(([, items]) => items);
     if (!tabs.some(([id]) => id === tab)) tab = tabs[0][0];
     const title = tabs.find(([id]) => id === tab)[1].replace(/ \(\d+\)$/, '');
@@ -743,6 +747,7 @@ async function renderOrders() {
 const sealText = (u) => [u.seal ? 'пломба № ' + u.seal : '', u.warranty === 1 ? 'талон выдан' : (u.warranty === 0 ? 'без талона' : '')].filter(Boolean).join(', ');
 let reqDay = today;
 let reqBase = '';
+let reqDriver = null;      // выбранный в легенде водитель: показываются только его заявки
 let reqMsg = null;
 const shiftDay = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
 const ruDay = (d) => d.slice(8, 10) + '.' + d.slice(5, 7) + '.' + d.slice(0, 4);
@@ -776,13 +781,18 @@ async function renderRequests() {
   const phones = (p) => (p ? p.split(',').map((x) => x.trim()).filter(Boolean).map((x, i) => [i ? el('br') : null, el('a', { href: 'tel:' + x.replace(/[^\d+]/g, '') }, x)]) : '');
   const allBases = [...new Set(r.leads.map((l) => l.base || 'База не указана'))];
   if (reqBase && !allBases.includes(reqBase)) reqBase = '';
-  const groups = allBases.filter((b) => !reqBase || b === reqBase).map((b) => [b, r.leads.filter((l) => (l.base || 'База не указана') === b)]);
   const free = r.leads.filter((l) => !active(l)).length;
   const sumL = (rows) => rows.reduce((a, l) => a + (l.liters || 0), 0);
   const legend = r.drivers.map((d) => {
     const mine = r.leads.filter((l) => active(l) && l.driver_id === d.id);
-    return { ...d, n: mine.length, liters: sumL(mine) };
-  }).filter((d) => d.n);
+    return { ...d, n: mine.length, liters: sumL(mine), left: mine.filter((l) => l.order_status === 'new').length };
+  }).filter((d) => d.n || d.id === reqDriver);
+  if (reqDriver && !r.drivers.some((d) => d.id === reqDriver)) reqDriver = null;
+  const picked = legend.find((d) => d.id === reqDriver) || null;
+  const shown = (l) => !picked || (active(l) && l.driver_id === picked.id);
+  const groups = allBases.filter((b) => !reqBase || b === reqBase)
+    .map((b) => [b, r.leads.filter((l) => (l.base || 'База не указана') === b && shown(l))]).filter(([, rows]) => rows.length);
+  const pickDriver = (id) => { reqDriver = reqDriver === id ? null : id; render(); };
   const a = r.amo;
   return el('div', null,
     el('div', { class: 'controls' },
@@ -802,8 +812,16 @@ async function renderRequests() {
       d.day.slice(8, 10) + '.' + d.day.slice(5, 7) + ' ', el('small', null, d.n + (d.free ? ` (${d.free} без вод.)` : ''))))) : null,
     r.leads.length ? el('p', { class: 'figures' }, el('b', { id: 'req-total' }, fmt(sumL(r.leads))), ' л, заявок: ', r.leads.length,
       free ? el('span', { class: 'bad' }, ', без водителя: ' + free) : null) : null,
-    legend.length ? el('div', { class: 'drv-legend', id: 'drv-legend' }, legend.map((d) => el('span', { style: '--drv:' + d.color }, el('i'),
-      el('b', null, d.name), ' ' + fmt(d.liters) + ' л · ' + d.n))) : null,
+    legend.length ? el('div', { class: 'drv-legend', id: 'drv-legend', role: 'group', 'aria-label': 'Заявки по водителям' },
+      picked ? el('button', { id: 'drv-all', onclick: () => pickDriver(null) }, 'Все водители') : null,
+      legend.map((d) => el('button', { style: '--drv:' + d.color, 'aria-pressed': d.id === reqDriver ? 'true' : 'false', 'data-driver': d.id,
+        title: 'Показать только заявки водителя ' + d.name, onclick: () => pickDriver(d.id) }, el('i'),
+        el('b', null, d.name), ' ' + fmt(d.liters) + ' л · ' + d.n))) : null,
+    picked ? el('p', { class: 'drv-picked', id: 'drv-picked', style: '--drv:' + picked.color },
+      el('b', null, picked.name), picked.n
+        ? `: заявок на ${ruDay(reqDay)} — ${picked.n}, ${fmt(picked.liters)} л` + (picked.left ? `, осталось сделать: ${picked.left}` : ', все выполнены')
+          + (picked.plate ? ' · газовоз ' + picked.plate : '')
+        : `: на ${ruDay(reqDay)} заявок нет`) : null,
     r.leads.length ? groups.map(([b, rows]) => el('section', null,
       el('div', { class: 'req-base' }, el('h2', null, b), el('span', null, fmt(sumL(rows)) + ' л · заявок: ' + rows.length)),
       el('div', { class: 'scroll' }, el('table', { id: 'requests' },

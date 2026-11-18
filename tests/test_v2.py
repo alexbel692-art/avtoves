@@ -513,7 +513,7 @@ def test_driver_app_and_logist_cabinet_in_browser(env):
         desk.click("nav [data-tab=legs]")
         expect(desk.locator("#legs thead")).to_contain_text("Топливо, л")
         # У логиста нет пользователей и подключений — только свой пароль
-        for hidden in ("drivers", "stavtrack", "routing", "amocrm", "driverapp"):
+        for hidden in ("drivers", "stavtrack", "routing", "amocrm", "driverapp", "clients"):
             expect(desk.locator(f"nav [data-tab={hidden}]")).to_have_count(0)
         desk.click("nav [data-tab=logists]")
         expect(desk.locator("main h1")).to_have_text("Мой пароль")

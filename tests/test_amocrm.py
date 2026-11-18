@@ -541,8 +541,23 @@ def test_driver_colors_seal_and_warranty(env):
         desk.click("nav button[data-tab='requests']")
         expect(desk.locator("tr[data-lead='31611863']")).to_have_class("drv")
         assert desk.locator("tr[data-lead='31611863']").get_attribute("style") == "--drv:#ae3ec9"
-        expect(desk.locator("#drv-legend span")).to_have_count(2)
-        expect(desk.locator("#drv-legend span").first).to_contain_text("Иванов Сергей")
+        expect(desk.locator("#drv-legend button[data-driver]")).to_have_count(2)
+        expect(desk.locator("#drv-legend button[data-driver]").first).to_contain_text("Иванов Сергей")
+        expect(desk.locator("nav button[data-tab='clients']")).to_have_count(0)      # раздел «Клиенты» скрыт
+        # Клик по водителю — только его заявки на день; ещё клик или «Все водители» — снова все
+        desk.click("#drv-legend button[data-driver='1']")
+        expect(desk.locator("#requests tbody tr")).to_have_count(2)
+        expect(desk.locator("tr[data-lead='31611863']")).to_have_count(0)
+        expect(desk.locator("#drv-picked")).to_contain_text("Иванов Сергей: заявок на")
+        expect(desk.locator("#drv-picked")).to_contain_text("осталось сделать: 1")
+        expect(desk.locator("#drv-legend button[data-driver='1']")).to_have_attribute("aria-pressed", "true")
+        desk.screenshot(path=SHOTS / "amocrm-driver-filter.png", full_page=True)
+        desk.click("#drv-all")
+        expect(desk.locator("#requests tbody tr")).to_have_count(3)
+        desk.click("#drv-legend button[data-driver='2']")
+        expect(desk.locator("#requests tbody tr")).to_have_count(1)
+        desk.click("#drv-legend button[data-driver='2']")
+        expect(desk.locator("#drv-picked")).to_have_count(0)
         expect(desk.locator("tr[data-lead='31865331']")).to_contain_text("пломба № ГП 004512, талон выдан")
         desk.screenshot(path=SHOTS / "amocrm-colors.png", full_page=True)
         # В отчёте выгрузок и в Excel
