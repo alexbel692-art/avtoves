@@ -342,7 +342,9 @@ def test_parse_amocrm_webhook():
     assert g == {"day": 825487, "liters": 828019, "address": 825393, "district": 1}
 
 
-def test_amocrm_webhook_updates_requests_at_once(env):
+def test_amocrm_webhook_updates_requests_at_once(env, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="amocrm")
     ctx, local, public, logist = env
     day = datetime.now().strftime("%Y-%m-%d")
     fake = FakeAmo(day)
@@ -391,6 +393,14 @@ def test_amocrm_webhook_updates_requests_at_once(env):
     assert ctx.pusher.sent[2][1] == "Заказ отменён"
     st = call(public, "/api/logist/amocrm", token=ctx.admin)[1]
     assert st["hook_count"] == 3 and st["last_hook"]
+    # Каждый вебхук виден в журнале сервера (journalctl -u avtoves)
+    text = caplog.text
+    assert "amoCRM вебхук отклонён: неверный адрес" in text and "amoCRM вебхук отклонён: Вебхук от другого аккаунта" in text
+    assert "amoCRM вебхук принят: события update, изменены сделки 31865331, удалены —" in text
+    assert "amoCRM вебхук принят: события add, изменены сделки 31999999" in text
+    assert "amoCRM вебхук принят: события delete, изменены сделки —, удалены 31865331" in text
+    assert "amoCRM вебхук обработан: сделок 1, изменилось заявок 1" in text
+    assert "amoCRM обмен: получено сделок" in text
 
     # Новый адрес: старый перестаёт работать
     s2 = call(public, "/api/logist/amocrm", "POST", {"domain": "rosavtonomg", "enabled": True, "new_hook_secret": True},

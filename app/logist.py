@@ -1651,6 +1651,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
     async def amo_hook(request: Request):
         """Вебхук amoCRM: сделка добавлена, изменена, сменила этап или удалена."""
         if not amo.check_secret(request.path_params["secret"]):
+            logging.getLogger("amocrm").warning(
+                "amoCRM вебхук отклонён: неверный адрес (секрет). Скопируйте адрес заново из «Подключения → amoCRM»")
             raise Bad("Не найдено", 404)
         raw = await request.body()
         if len(raw) > 5_000_000:
@@ -1658,6 +1660,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
         try:
             n = amo.hook(raw)
         except AmoError as ex:
+            logging.getLogger("amocrm").warning("amoCRM вебхук отклонён: %s", ex)
             raise Bad(str(ex), 403) from ex
         return JSONResponse({"ok": True, "leads": n})
 

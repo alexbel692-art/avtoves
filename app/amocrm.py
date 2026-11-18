@@ -315,9 +315,12 @@ class AmoCRM:
                 res = self._sync(s, full)
             except AmoError as ex:
                 self._mark(last_error=str(ex), last_sync=datetime.now().isoformat(timespec="seconds"))
+                log.warning("amoCRM обмен: %s", ex)
                 raise
             self._mark(last_error="", last_sync=datetime.now().isoformat(timespec="seconds"),
                        last_count=res["count"], cursor=max(res["cursor"], 0) or started - 60)
+            if res["count"] or full:
+                log.info("amoCRM обмен: получено сделок %s, изменилось заявок %s", res["count"], res["changed"])
             return res
 
     def _mark(self, **kw):
@@ -399,6 +402,9 @@ class AmoCRM:
         if sub and domain and not domain.startswith(sub + "."):
             raise AmoError("Вебхук от другого аккаунта amoCRM")
         changed, deleted = hook_leads(payload)
+        events = sorted(k for k in (payload.get("leads") or {}) if isinstance(payload.get("leads"), dict))
+        log.info("amoCRM вебхук принят: события %s, изменены сделки %s, удалены %s", ", ".join(events) or "—",
+                 ", ".join(map(str, sorted(changed))) or "—", ", ".join(map(str, sorted(deleted))) or "—")
         with self.hook_lock:
             for lid in changed:
                 self.hook_queue.setdefault(lid, False)
@@ -414,7 +420,11 @@ class AmoCRM:
         """Перечитывает сделки из очереди вебхука. Возвращает, сколько заявок изменилось."""
         with self.hook_lock:
             queue, self.hook_queue = self.hook_queue, {}
-        if not queue or not self.ready():
+        if not queue:
+            return 0
+        if not self.ready():
+            log.warning("amoCRM вебхук: обмен не настроен (адрес, ключ или поле «Дата доставки») — сделки %s пропущены",
+                        ", ".join(map(str, sorted(queue))))
             return 0
         with self.lock:
             s = self.settings()
@@ -438,7 +448,10 @@ class AmoCRM:
                     for lid in ids:
                         self.hook_queue.setdefault(lid, False)
                 self._mark(last_error=str(ex))
+                log.warning("amoCRM вебхук: не удалось перечитать сделки %s — %s; повтор позже",
+                            ", ".join(map(str, ids)), ex)
                 raise
+            log.info("amoCRM вебхук обработан: сделок %s, изменилось заявок %s", len(queue), changed)
             return changed
 
     def _forget(self, lead_id: int) -> bool:
@@ -525,8 +538,8 @@ class AmoCRM:
             if self.ready():
                 try:
                     self.sync()
-                except AmoError as ex:
-                    log.warning("amoCRM: %s", ex)
+                except AmoError:
+                    pass                    # уже в журнале: «amoCRM обмен: …»
                 except Exception:  # noqa: BLE001
                     log.exception("amoCRM: сбой обмена")
             self.wake.wait(max(1, int(s.get("interval_min") or 5)) * 60)
