@@ -332,7 +332,7 @@ def test_weighing_unloads_and_reconciliation(env):
     from openpyxl import load_workbook
     code, data = call(public, "/api/logist/report.xlsx" + q, token=logist, raw=True)
     book = load_workbook(io.BytesIO(data))
-    assert book["Итого"]["B2"].value == 44800 and book["Сверка с весами"]["L2"].value == "расхождение"
+    assert book["Итого"]["B2"].value == 44800 and book["Сверка с весами"]["M2"].value == "расхождение"
 
     # Логист исправил выгрузку: расхождение уходит; водитель не может удалить выгрузку со счётом
     assert call(public, "/api/logist/unloads/u4", "PATCH", {"liters": 24850}, logist)[0] == 200
@@ -783,6 +783,7 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     # Датчики СУГ машины и её бочки записаны при каждом взвешивании
     assert ws[0]["lpg"] == [{"name": "Уровень ППМ", "type": "arbitrary", "value": 63.46, "unit": "%", "src": "прицеп"},
                             {"name": "Плотность", "type": "arbitrary", "value": None, "unit": "", "src": "прицеп"}]
+    assert [w["lpg_pct"] for w in ws] == [63.5, 63.5, 63.5]          # заполнение цистерны в % при каждом взвешивании
     # В тару входит 400 л топлива: газ пересчитывается, сверка та же
     call(public, "/api/logist/stavtrack", "POST", {**cfg, "password": "", "fuel_in_tare_l": "400"}, ctx.admin)
     [leg] = call(public, "/api/logist/legs" + q, token=logist)[1]
@@ -839,6 +840,22 @@ def test_fuel_sensor_from_stavtrack_corrects_reconciliation(env):
     ctx.stavtrack.save({})
     weigh(ctx, public, token, "arrival", 15500, t0 + timedelta(hours=5, minutes=30))
     assert "Ставтрэк" in wait_fuel(ctx, 5)[-1]["note"]
+
+    # Кабинет: взвешивания с топливом по ДУТ, газом без топлива и СУГ в % (снимок для презентации)
+    from playwright.sync_api import expect, sync_playwright
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={"width": 1366, "height": 760})
+        page.goto(public + "/logist")
+        page.fill("#l-login", "olga")
+        page.fill("#l-pass", "parol-logista")
+        page.click("#l-enter")
+        page.click("nav [data-tab=weighings]")
+        page.locator("main input[type=date]").first.fill(f"{t0:%Y-%m-%d}")
+        page.locator("main input[type=date]").first.dispatch_event("change")
+        expect(page.locator(".lpg-pct").first).to_have_text("63,5 %")
+        page.screenshot(path=SHOTS / "weighings-fuel.png")
+        browser.close()
 
 
 def test_map_in_browser(env):
@@ -1319,3 +1336,112 @@ def test_firebase_key_from_admin_cabinet_and_test_push(env):
     info = call(public, "/api/logist/appinfo", token=ctx.admin)[1]
     assert [(d["name"], d["phones"]) for d in info["push_list"]] == [("Иванов Сергей", 1), ("Петров Пётр", 0)]
     assert call(public, "/api/logist/appinfo/firebase", "DELETE", token=ctx.admin)[0] == 200 and not f.exists()
+
+
+def test_lpg_percent_at_unload_and_refuels(env):
+    """СУГ в цистерне (%) по датчику ППМ при каждой выгрузке; дозаправка цистерны газом в пути и её учёт."""
+    from playwright.sync_api import expect, sync_playwright
+    from app.stavtrack import lpg_pct
+    ctx, local, public, logist = env
+    # Процент: датчик в % — как есть; в литрах — от объёма цистерны; бочка важнее машины
+    assert lpg_pct([{"name": "Уровень ППМ", "value": 63.46, "unit": "%", "src": "машина"}], {}) == 63.5
+    assert lpg_pct([{"name": "Объём СУГ", "value": 9000, "unit": "л", "src": "прицеп"}], {"прицеп": 45000}) == 20.0
+    assert lpg_pct([{"name": "Уровень", "value": 50, "unit": "%", "src": "машина"},
+                    {"name": "Уровень", "value": 30, "unit": "%", "src": "прицеп"}], {}) == 30.0
+    assert lpg_pct([{"name": "Плотность", "value": 0.5, "unit": "г/см3", "src": "машина"}], {}) is None
+
+    stv = ctx.stavtrack
+    stv.ready = lambda: True
+    asked = []
+
+    def fake_lpg(plate, trailer=""):
+        asked.append((plate, trailer))
+        return [{"name": "Уровень ППМ", "type": "", "value": 9000, "unit": "л", "src": "прицеп"}]
+    stv.lpg_readings = fake_lpg
+    token = driver_token(public)
+    now = datetime.now()
+    assert unload(public, token, "u-now", 1200, now)["ok"]
+    assert unload(public, token, "u-late", 300, now - timedelta(hours=2))["ok"]     # без связи, отправлена позже
+    for _ in range(100):
+        if len(ctx.db.q("SELECT * FROM unload_lpg")) == 2:
+            break
+        time.sleep(0.05)
+    rows = {r["unload_id"]: r for r in ctx.db.q("SELECT * FROM unload_lpg")}
+    assert rows["u-now"]["pct"] == 20.0 and asked == [("Т100АА26", "АВ123477")]
+    assert rows["u-late"]["pct"] is None and "позже" in rows["u-late"]["note"]
+    day = now.strftime("%Y-%m-%d")
+    rep = call(public, f"/api/logist/report?from={(now - timedelta(days=1)).strftime('%Y-%m-%d')}&to={day}", token=logist)[1]
+    assert {u["id"]: u["lpg_pct"] for u in rep["unloads"]} == {"u-now": 20.0, "u-late": None}
+    assert call(public, "/api/app/me", token=token)[1]["unloads"][0]["lpg_pct"] == 20.0
+    stv.ready = lambda: False
+
+    # Точки заправки заводит логист; менеджер и водитель — нет
+    assert call(public, "/api/logist/stations", "POST", {"name": "АГЗС Газпром, Минское ш. 45 км"}, logist)[0] == 200
+    assert call(public, "/api/logist/stations", "POST", {"name": "Налив на базе Мотяково", "address": "Онуфриево"}, logist)[0] == 200
+    assert call(public, "/api/logist/stations", "POST", {"name": "налив на базе мотяково"}, logist)[0] == 409
+    assert call(public, "/api/logist/stations", token=ctx.admin)[0] == 403
+    stations = {s["name"]: s["id"] for s in call(public, "/api/logist/stations", token=logist)[1]}
+    me = call(public, "/api/app/me", token=token)[1]
+    assert [s["name"] for s in me["stations"]] == ["АГЗС Газпром, Минское ш. 45 км", "Налив на базе Мотяково"]
+
+    def refuel(rid, liters, moment, station="Налив на базе Мотяково", **extra):
+        op = {"op_id": "r" + rid, "type": "refuel", "id": rid, "plate": "Т100АА26", "station_id": stations.get(station),
+              "liters": liters, "at": moment.astimezone().isoformat(), **extra}
+        return call(public, "/api/app/sync", "POST", {"ops": [op]}, token)[1]["results"][0]
+
+    # Сверка: выезд → долили газ в пути → возврат; отвезено по весам = при выезде + долито − при возврате
+    t0 = now - timedelta(hours=5)
+    weigh(ctx, public, token, "arrival", 15500, t0 - timedelta(hours=1))
+    weigh(ctx, public, token, "departure", 40800, t0)
+    assert refuel("f1", 5000, t0 + timedelta(hours=1), comment="долили до 85 %")["ok"]
+    assert refuel("f1", 5000, t0 + timedelta(hours=1))["ok"]                       # повтор не задваивает
+    assert "точку" in refuel("f3", 10, now, station="нет такой")["error"]
+    assert "больше нуля" in refuel("f4", 0, now)["error"]
+    weigh(ctx, public, token, "arrival", 20000, t0 + timedelta(hours=3))
+    leg = [g for g in call(public, "/api/logist/legs?from=" + (now - timedelta(days=1)).strftime("%Y-%m-%d") + f"&to={day}",
+                           token=logist)[1] if g["start"] == t0.isoformat(timespec="seconds")][0]
+    assert leg["refuel_l"] == 5000
+    assert leg["scale_l"] == leg["out_l"] + 5000 - leg["in_l"]
+    assert refuel("f5", 600, now, station="АГЗС Газпром, Минское ш. 45 км")["ok"]
+    r = call(public, f"/api/logist/refuels?from={(now - timedelta(days=1)).strftime('%Y-%m-%d')}&to={day}", token=logist)[1]
+    assert r["total"] == 5600 and len(r["refuels"]) == 2
+    assert sum(d["liters"] for d in r["days"]) == 5600 and r["days"][0]["drivers"]["Иванов Сергей"] >= 600
+    code, raw = call(public, f"/api/logist/report.xlsx?from={day}&to={day}", token=logist, raw=True)
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(raw))
+    assert [c.value for c in wb["Дозаправки газом"][1]] == ["Дата и время", "Водитель", "Машина", "Точка заправки", "Газа, л", "Комментарий"]
+    assert "Долито в пути, л" in [c.value for c in wb["Сверка с весами"][1]]
+    assert [c.value for c in wb["Выгрузки"][1]][-1] == "СУГ в цистерне после выгрузки, %"
+    assert call(public, "/api/logist/refuels/f5", "DELETE", token=logist)[0] == 200
+    assert call(public, f"/api/logist/refuels?from={(now - timedelta(days=1)).strftime('%Y-%m-%d')}&to={day}",
+                token=logist)[1]["total"] == 5000
+
+    # В приложении: кнопка «Заправка», выбор точки, литры; итог на экране «День»
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=2)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(APP_HTML.as_uri())
+        page.fill("#server", public)
+        page.fill("#login", "ivanov")
+        page.fill("#password", PASSWORD)
+        page.click("#enter")
+        page.click("#change-vehicle")
+        page.click("button.pick:has-text('Т100АА26')")
+        page.click("button.pick:has-text('АВ123477')")
+        if page.locator("#vehicle-done").count():
+            page.click("#vehicle-done")
+        page.click("#new-refuel")
+        page.select_option("#station", label="АГЗС Газпром, Минское ш. 45 км")
+        page.fill("#refuel-liters", "3500")
+        page.screenshot(path=SHOTS / "app-refuel.png")
+        page.click("#save-refuel")
+        expect(page.locator(".toast")).to_contain_text("Дозаправка записана")
+        page.click("#tab-day")
+        expect(page.locator("#refuel-total")).to_have_text("3\xa0500")
+        expect(page.locator(".trip.lpg, .meta.lpg").first).to_contain_text("20 %")
+        page.screenshot(path=SHOTS / "app-day-refuel.png", full_page=True)
+        browser.close()
+    assert errors == []
+    assert ctx.db.q("SELECT liters, station FROM refuels WHERE liters=3500")[0]["station"] == "АГЗС Газпром, Минское ш. 45 км"

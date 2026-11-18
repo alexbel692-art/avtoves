@@ -569,8 +569,8 @@ def test_driver_colors_seal_and_warranty(env):
     import io as _io
     from openpyxl import load_workbook
     sh = load_workbook(_io.BytesIO(raw))["Выгрузки"]
-    assert [c.value for c in sh[1]][-2:] == ["Номер пломбы", "Гарантийный талон"]
-    assert [c.value for c in sh[2]][-2:] == ["ГП 004512", "выдан"]
+    assert [c.value for c in sh[1]][-3:-1] == ["Номер пломбы", "Гарантийный талон"]
+    assert [c.value for c in sh[2]][-3:-1] == ["ГП 004512", "выдан"]
     # Логист может исправить пломбу и талон
     uid = ctx.db.q("SELECT id FROM unloads")[0]["id"]
     assert call(public, f"/api/logist/unloads/{uid}", "PATCH", {"seal": "ГП 004513", "warranty": False}, logist)[0] == 200

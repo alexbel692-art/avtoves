@@ -30,7 +30,7 @@ from . import settings as st
 from .plates import normalize as norm_plate
 from .routing import PRECISE, RouteError, Routing, best_order
 from .amocrm import ROLES as AMO_ROLES, AmoCRM, AmoError, clean_domain
-from .stavtrack import Stavtrack, StError
+from .stavtrack import Stavtrack, StError, lpg_pct
 from .weighing import DriverError
 
 STATIC = Path(__file__).parent / "static"
@@ -102,6 +102,28 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS ix_orders_driver ON orders(driver_id, status);
 CREATE TABLE IF NOT EXISTS push_tokens (token TEXT PRIMARY KEY, driver_id INTEGER NOT NULL, updated TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notes_done (kind TEXT NOT NULL, ref TEXT NOT NULL, PRIMARY KEY(kind, ref));
+-- Дозаправка цистерны газом (СУГ) в пути на точках, которые завёл логист
+CREATE TABLE IF NOT EXISTS fuel_stations (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    name      TEXT NOT NULL UNIQUE,
+    address   TEXT NOT NULL DEFAULT '',
+    active    INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS refuels (
+    id         TEXT PRIMARY KEY,              -- код с телефона: повторная отправка не задваивает
+    driver_id  INTEGER NOT NULL,
+    driver     TEXT NOT NULL DEFAULT '',
+    plate      TEXT NOT NULL DEFAULT '',
+    station_id INTEGER,
+    station    TEXT NOT NULL DEFAULT '',
+    liters     REAL NOT NULL,
+    ts         TEXT NOT NULL,
+    comment    TEXT NOT NULL DEFAULT '',
+    created    TEXT NOT NULL,
+    deleted    TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_refuels_ts ON refuels(ts);
+CREATE INDEX IF NOT EXISTS ix_refuels_plate ON refuels(plate, ts);
 """
 
 
@@ -374,19 +396,24 @@ def legs(db, density: float, tol_pct: float, tol_l: float, date_from: str | None
                     "WHERE u.plate=? AND u.deleted IS NULL AND u.ts>=? AND u.ts<? ORDER BY u.ts",
                     (t["plate"], start, end or "9999"))
         by_driver = round(sum(r["liters"] for r in rows), 2)
+        refuel_l = sum(r["liters"] for r in db.q(
+            "SELECT liters FROM refuels WHERE plate=? AND deleted IS NULL AND ts>=? AND ts<?",
+            (t["plate"], start, end or "9999"))) if db.q("SELECT 1 FROM sqlite_master WHERE name='refuels'") else 0
         out_l = round(t["gas_out"] / density)
         leg = {"id": t["id"], "plate": t["plate"], "trailer": t.get("trailer") or "", "driver": t.get("driver") or "",
                "start": start, "end": end, "out_l": out_l, "in_l": None, "scale_l": None,
                "driver_l": by_driver, "unloads": len(rows), "diff_l": None, "diff_pct": None,
-               "status": "open", "left_l": round(out_l - by_driver),
-               "fuel_out": fuel_at(t.get("w2_id")), "fuel_in": None, "fuel_fix_l": None}
+               "status": "open", "left_l": round(out_l + refuel_l - by_driver),
+               "fuel_out": fuel_at(t.get("w2_id")), "fuel_in": None, "fuel_fix_l": None,
+               "refuel_l": round(refuel_l, 1)}
         if nxt:
             same = (nxt.get("trailer") or "") == leg["trailer"]
             if nxt.get("gas_in") is None or not same:
                 leg["status"] = "unknown"      # нет тары или вернулся с другим прицепом — сравнить нельзя
             else:
                 leg["in_l"] = round(nxt["gas_in"] / density)
-                leg["scale_l"] = leg["out_l"] - leg["in_l"]
+                # отвезено по весам = было при выезде + долито газа в пути − осталось при возврате
+                leg["scale_l"] = round(leg["out_l"] + refuel_l - leg["in_l"])
                 leg["fuel_in"] = fuel_at(nxt.get("w1_id"))
                 if leg["fuel_out"] is not None and leg["fuel_in"] is not None:
                     # Топливо уже вычтено из газа при каждом взвешивании (db.recalc_gas);
@@ -552,7 +579,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
                 "ts": r["ts"], "plate": r["plate"], "trailer": r["trailer"], "comment": r["comment"],
                 "driver": r["driver"], "driver_id": r["driver_id"], "invoice": r["invoice"],
                 "paid": r.get("paid") or "", "order_id": r.get("order_id"),
-                "seal": r.get("seal") or "", "warranty": r.get("warranty")}
+                "seal": r.get("seal") or "", "warranty": r.get("warranty"),
+                "lpg_pct": r.get("lpg_pct"), "lpg_note": r.get("lpg_note") or ""}
 
     def combo_of(driver: dict) -> tuple[str, str]:
         last = db.q("SELECT plate, trailer FROM weighings WHERE driver_id=? ORDER BY id DESC LIMIT 1", (driver["id"],))
@@ -569,7 +597,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         leg = found[0] if found else None
         if not leg or leg["status"] != "open":
             return None
-        return {"start": leg["start"], "out_l": leg["out_l"], "driver_l": leg["driver_l"], "left_l": leg["left_l"]}
+        return {"start": leg["start"], "out_l": leg["out_l"], "driver_l": leg["driver_l"], "left_l": leg["left_l"],
+                "refuel_l": leg["refuel_l"]}
 
     @handler
     async def app_me(request: Request):
@@ -580,7 +609,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         plate, trailer = combo_of(d)
         since = (datetime.now() - timedelta(days=8)).isoformat(timespec="seconds")
         today = datetime.now().strftime("%Y-%m-%dT00:00:00")
-        mine = db.q("SELECT u.*, c.name AS client FROM unloads u JOIN clients c ON c.id=u.client_id "
+        mine = db.q("SELECT u.*, c.name AS client, ul.pct AS lpg_pct, ul.note AS lpg_note FROM unloads u "
+                    "JOIN clients c ON c.id=u.client_id LEFT JOIN unload_lpg ul ON ul.unload_id=u.id "
                     "WHERE u.driver_id=? AND u.deleted IS NULL AND u.ts>=? ORDER BY u.ts DESC", (d["id"], since))
         return JSONResponse({
             "version": __version__,
@@ -600,6 +630,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
                            "WHERE o.driver_id=? AND o.status='new' ORDER BY o.day, o.pos, o.id", (d["id"],)),
             "push": pusher.ready(),
             "unloads": [unload_json(r) for r in mine],
+            "stations": db.q("SELECT id, name, address FROM fuel_stations WHERE active=1 ORDER BY name"),
+            "refuels": db.q("SELECT id, plate, station, liters, ts, comment FROM refuels WHERE driver_id=? AND deleted IS NULL "
+                            "AND ts>=? ORDER BY ts DESC", (d["id"], since)),
             "road": road_info(plate),
             "weighings": [{"id": w["id"], "ts": w["ts"], "plate": w["plate"], "trailer": w.get("trailer", ""),
                            "weight": w["weight"], "kind": w["kind"], "photo": photo_url(w["snapshots"], token)}
@@ -714,6 +747,27 @@ def build_routes(ctx, public: bool) -> list[Route]:
         if order:
             db.x("UPDATE orders SET status='done', closed=?, unload_id=?, reason='' WHERE id=?", (ts, uid, order["id"]))
         refresh_invoice(uid)
+        stv.on_unload(uid, plate, trailer, ts)           # сколько СУГ осталось в цистерне после выгрузки
+
+    def apply_refuel(d: dict, op: dict):
+        """Водитель долил газ (СУГ) в цистерну на точке заправки в пути."""
+        rid = text(op.get("id"), "Код заправки", 64)
+        have = db.q("SELECT driver_id FROM refuels WHERE id=?", (rid,))
+        if have:
+            if have[0]["driver_id"] != d["id"]:
+                raise Bad("Код заправки уже занят")
+            return
+        plate = norm_plate(str(op.get("plate") or ""))[0]
+        if len(plate) < 6:
+            raise Bad("Не выбрана машина")
+        st_ = db.q("SELECT * FROM fuel_stations WHERE id=?", (op.get("station_id"),))
+        if not st_:
+            raise Bad("Выберите точку заправки")
+        amount = liters_value(op.get("liters"))
+        db.x("INSERT INTO refuels(id,driver_id,driver,plate,station_id,station,liters,ts,comment,created) "
+             "VALUES(?,?,?,?,?,?,?,?,?,?)",
+             (rid, d["id"], d["name"], plate, st_[0]["id"], st_[0]["name"], amount, local_ts(op.get("at")),
+              text(op.get("comment"), "Комментарий", 200, False), now_iso()))
 
     def apply_order_fail(d: dict, op: dict):
         found = db.q("SELECT * FROM orders WHERE id=?", (op.get("order_id"),))
@@ -760,7 +814,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         for op in ops:
             key = op.get("op_id") if isinstance(op, dict) else None
             try:
-                kinds = {"unload": apply_unload, "delete": apply_delete, "order_fail": apply_order_fail}
+                kinds = {"unload": apply_unload, "delete": apply_delete, "order_fail": apply_order_fail,
+                         "refuel": apply_refuel}
                 if not isinstance(op, dict) or op.get("type") not in kinds:
                     raise Bad("Неизвестный тип записи")
                 kinds[op["type"]](d, op)
@@ -1001,7 +1056,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
 
     def report(request: Request, owner: int | None = None) -> dict:
         start, end = period(request)
-        sql = ("SELECT u.*, c.name AS client FROM unloads u JOIN clients c ON c.id=u.client_id "
+        sql = ("SELECT u.*, c.name AS client, ul.pct AS lpg_pct, ul.note AS lpg_note FROM unloads u "
+               "JOIN clients c ON c.id=u.client_id LEFT JOIN unload_lpg ul ON ul.unload_id=u.id "
                "WHERE u.deleted IS NULL AND u.ts>=? AND u.ts<=?")
         args: list = [start, end + "T23:59:59"]
         if owner is not None:
@@ -1075,19 +1131,19 @@ def build_routes(ctx, public: bool) -> list[Route]:
         ws.column_dimensions["A"].width = 34
         sh = wb.create_sheet("Выгрузки")
         sh.append(["Дата и время", "Водитель", "Машина", "Прицеп", "Клиент", "Литры", "Счёт", "Комментарий", "Оплата",
-                   "Номер пломбы", "Гарантийный талон"])
+                   "Номер пломбы", "Гарантийный талон", "СУГ в цистерне после выгрузки, %"])
         for c in sh[1]:
             c.font = bold
         for u in data["unloads"]:
             sh.append([u["ts"].replace("T", " "), safe_cell(u["driver"]), u["plate"], u["trailer"], safe_cell(u["client"]),
                        u["liters"], {"pending": "нужно выставить", "done": "выставлен"}.get(u["invoice"], ""),
                        safe_cell(u["comment"]), {"yes": "оплачено", "no": "не оплачено"}.get(u["paid"], ""),
-                       safe_cell(u["seal"]), {1: "выдан", 0: "не выдан"}.get(u["warranty"], "")])
-        for col, w in zip("ABCDEFGHIJK", (20, 26, 14, 14, 30, 12, 18, 40, 14, 16, 18)):
+                       safe_cell(u["seal"]), {1: "выдан", 0: "не выдан"}.get(u["warranty"], ""), u["lpg_pct"]])
+        for col, w in zip("ABCDEFGHIJKL", (20, 26, 14, 14, 30, 12, 18, 40, 14, 16, 18, 20)):
             sh.column_dimensions[col].width = w
         lg = wb.create_sheet("Сверка с весами")
         lg.append(["Выезд", "Возврат", "Машина", "Прицеп", "Водитель", "При выезде, л", "При возврате, л",
-                   "По весам, л", "По водителю, л", "Разница, л", "Разница, %", "Итог", "Поправка на топливо, л"])
+                   "Долито в пути, л", "По весам, л", "По водителю, л", "Разница, л", "Разница, %", "Итог", "Поправка на топливо, л"])
         for c in lg[1]:
             c.font = bold
         cfg_ = lcfg()
@@ -1095,10 +1151,20 @@ def build_routes(ctx, public: bool) -> list[Route]:
         for leg in [] if owner else legs(db, density(), cfg_["tolerance_pct"], cfg_["tolerance_l"], data["from"],
                                           data["to"] + "T23:59:59"):
             lg.append([leg["start"].replace("T", " "), (leg["end"] or "").replace("T", " "), leg["plate"],
-                       leg["trailer"], safe_cell(leg["driver"]), leg["out_l"], leg["in_l"], leg["scale_l"],
+                       leg["trailer"], safe_cell(leg["driver"]), leg["out_l"], leg["in_l"], leg["refuel_l"], leg["scale_l"],
                        leg["driver_l"], leg["diff_l"], leg["diff_pct"], names[leg["status"]], leg["fuel_fix_l"]])
-        for col in "ABCDEFGHIJKLM":
+        for col in "ABCDEFGHIJKLMN":
             lg.column_dimensions[col].width = 17
+        if not owner:
+            rf = wb.create_sheet("Дозаправки газом")
+            rf.append(["Дата и время", "Водитель", "Машина", "Точка заправки", "Газа, л", "Комментарий"])
+            for c in rf[1]:
+                c.font = bold
+            for r in refuel_rows(data["from"], data["to"]):
+                rf.append([r["ts"].replace("T", " "), safe_cell(r["driver"]), r["plate"], safe_cell(r["station"]),
+                           r["liters"], safe_cell(r["comment"])])
+            for col, w in zip("ABCDEF", (20, 26, 14, 30, 12, 40)):
+                rf.column_dimensions[col].width = w
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
@@ -1489,6 +1555,55 @@ def build_routes(ctx, public: bool) -> list[Route]:
             push(rows[0]["driver_id"], "Заказ отменён", f"{rows[0]['client']}: {rows[0]['liters']:g} л")
         return JSONResponse({"ok": True})
 
+    # ---- дозаправки цистерн газом: точки заправки и учёт по дням
+    def refuel_rows(start: str, end: str) -> list[dict]:
+        return db.q("SELECT * FROM refuels WHERE deleted IS NULL AND ts>=? AND ts<=? ORDER BY ts DESC",
+                    (start, end + "T23:59:59"))
+
+    @handler
+    async def stations_api(request: Request):
+        logist_of(request)
+        if request.method == "POST":
+            b = await body(request)
+            name = text(b.get("name"), "Название точки", 120)
+            f = (name, text(b.get("address"), "Адрес", 300, False), int(b.get("active", True) is not False))
+            clash = [r for r in db.q("SELECT id, name FROM fuel_stations") if r["name"].casefold() == name.casefold()]
+            sid = b.get("id")
+            if clash and clash[0]["id"] != sid:
+                raise Bad("Такая точка уже есть", 409)
+            if sid:
+                if not db.q("SELECT 1 FROM fuel_stations WHERE id=?", (sid,)):
+                    raise Bad("Точка не найдена", 404)
+                db.x("UPDATE fuel_stations SET name=?, address=?, active=? WHERE id=?", (*f, sid))
+            else:
+                sid = db.x("INSERT INTO fuel_stations(name, address, active) VALUES(?,?,?)", f)
+            return JSONResponse({"ok": True, "id": sid})
+        return JSONResponse(db.q("SELECT * FROM fuel_stations ORDER BY active DESC, name"))
+
+    @handler
+    async def refuels_api(request: Request):
+        logist_of(request)
+        start, end = period(request)
+        rows = refuel_rows(start, end)
+        by_day: dict[str, dict] = {}
+        for r in rows:
+            e = by_day.setdefault(r["ts"][:10], {"day": r["ts"][:10], "liters": 0.0, "count": 0, "drivers": {}})
+            e["liters"] += r["liters"]
+            e["count"] += 1
+            e["drivers"][r["driver"]] = round(e["drivers"].get(r["driver"], 0) + r["liters"], 2)
+        days = [{**e, "liters": round(e["liters"], 2)} for e in sorted(by_day.values(), key=lambda x: x["day"], reverse=True)]
+        return JSONResponse({"refuels": rows, "days": days, "total": round(sum(r["liters"] for r in rows), 2)})
+
+    @handler
+    async def refuel_delete(request: Request):
+        u = logist_of(request)
+        rid = request.path_params["rid"]
+        if not db.q("SELECT 1 FROM refuels WHERE id=? AND deleted IS NULL", (rid,)):
+            raise Bad("Заправка не найдена", 404)
+        db.x("UPDATE refuels SET deleted=? WHERE id=?", (now_iso(), rid))
+        ctx.ctrl.event(f"Логист {u['login']}: заправка удалена")
+        return JSONResponse({"ok": True})
+
     # ---- заявки из amoCRM: логист выбирает водителя, заявка уходит заказом в приложение
     def amo_client(lead: dict) -> dict:
         """Клиент заявки: по контакту amoCRM, иначе по имени; новый клиент — частное лицо."""
@@ -1580,8 +1695,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
             raise Bad("Некорректная дата")
         rows = db.q("SELECT a.*, o.status AS order_status, o.driver_id, o.reason, d.name AS driver, d.color AS dcolor, "
                     "un.liters AS fact, "
-                    "un.paid, un.seal, un.warranty, un.plate AS fact_plate FROM amo_leads a LEFT JOIN orders o ON o.id=a.order_id LEFT JOIN drivers d ON d.id=o.driver_id "
-                    "LEFT JOIN unloads un ON un.id=o.unload_id WHERE a.day=? AND a.lost=0 "
+                    "un.paid, un.seal, un.warranty, un.plate AS fact_plate, ul.pct AS lpg_pct FROM amo_leads a LEFT JOIN orders o ON o.id=a.order_id LEFT JOIN drivers d ON d.id=o.driver_id "
+                    "LEFT JOIN unloads un ON un.id=o.unload_id LEFT JOIN unload_lpg ul ON ul.unload_id=un.id WHERE a.day=? AND a.lost=0 "
                     "ORDER BY a.base, a.highway, a.district, a.lead_id", (day,))
         drivers = [{"id": d["id"], "name": d["name"], "plate": combo_of(d)[0], "color": driver_color(d)}
                    for d in db.q("SELECT * FROM drivers WHERE active=1 AND login<>'' ORDER BY name")]
@@ -1928,6 +2043,7 @@ def build_routes(ctx, public: bool) -> list[Route]:
             "kind": w.get("kind") or "", "source": w.get("source") or "", "driver": w.get("driver") or "",
             "fuel": w.get("fuel"), "fuel_note": w.get("fuel_note") or "",
             "gas": gas_of(w), "lpg": json.loads(w["lpg"]) if w.get("lpg") else [],
+            "lpg_pct": lpg_pct(json.loads(w["lpg"]), stv.tanks(w["plate"], w.get("trailer") or "")) if w.get("lpg") else None,
             "photos": [f"/api/logist/photo/{x}?t={tok}" for x in (w["snapshots"] or "").split(";") if x],
         } for w in rows])
 
@@ -2048,6 +2164,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
         Route("/api/logist/routing", routing_api, methods=["GET", "POST"]),
         Route("/api/logist/orders/{oid:int}/seen", order_note_done, methods=["POST"]),
         Route("/api/logist/amo/leads", amo_leads),
+        Route("/api/logist/stations", stations_api, methods=["GET", "POST"]),
+        Route("/api/logist/refuels", refuels_api),
+        Route("/api/logist/refuels/{rid}", refuel_delete, methods=["DELETE"]),
         Route("/api/logist/amo/assign", amo_assign_api, methods=["POST"]),
         Route("/api/logist/amo/sync", amo_sync_api, methods=["POST"]),
         Route("/api/logist/amocrm", amo_settings_api, methods=["GET", "POST"]),

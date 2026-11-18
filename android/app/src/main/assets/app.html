@@ -124,6 +124,9 @@ label.check-row:has(input:checked) { border-color: var(--blue); background: var(
 .dock { position: fixed; left: 0; right: 0; bottom: var(--bar-h); z-index: 5; padding: 10px 14px; background: linear-gradient(to top, var(--bg) 70%, rgba(233,237,240,0)); display: flex; justify-content: center; }
 .dock > * { max-width: 532px; }
 .dock.solo { bottom: 0; padding-bottom: 14px; }
+.dock-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.dock-row #new-refuel { padding: 8px 16px; }
+.trip .lpg { color: var(--blue); font-weight: 600; }
 .has-dock { padding-bottom: calc(var(--bar-h) + 100px); }
 .has-dock.tall { padding-bottom: calc(var(--bar-h) + 175px); }
 

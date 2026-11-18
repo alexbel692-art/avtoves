@@ -69,6 +69,7 @@ const ICONS = {
   scale: 'M4 19h16M6.5 19 8 12h8l1.5 7M12 12V6M8.5 6h7',
   day: 'M5 5h14v15H5zM5 9h14M9 3v4M15 3v4M8.5 13h3M8.5 16.5h6',
   route: 'M4 11 20 4l-7 16-2-7z',
+  fuel: 'M4 20V5a1.5 1.5 0 0 1 1.5-1.5h7A1.5 1.5 0 0 1 14 5v15M3 20h12M6.5 8h5M14 9h2.5a1.5 1.5 0 0 1 1.5 1.5V16a1.5 1.5 0 0 0 3 0V8l-3-3',
   phone: 'M6.6 3.5h3l1.5 4-2 1.3a11 11 0 0 0 6.1 6.1l1.3-2 4 1.5v3A2.1 2.1 0 0 1 18.2 20 15.6 15.6 0 0 1 4 5.8a2.1 2.1 0 0 1 2.6-2.3z',
   back: 'M15 5l-7 7 7 7',
   check: 'M5 12.5 10 17 19 7',
@@ -286,7 +287,10 @@ function leftInTank() {
   if (!road) return null;
   const queued = data.queue.filter((op) => op.type === 'unload' && op.plate === data.plate)
     .reduce((sum, op) => sum + op.liters, 0);
-  return Math.round(road.left_l - queued);
+  // газ, долитый в пути и ещё не отправленный, тоже уже в цистерне
+  const refilled = data.queue.filter((op) => op.type === 'refuel' && op.plate === data.plate)
+    .reduce((sum, op) => sum + op.liters, 0);
+  return Math.round(road.left_l - queued + refilled);
 }
 
 // ----- экраны -----
@@ -298,6 +302,7 @@ function render() {
   else if (screen === 'weigh') renderWeigh();
   else if (screen === 'day') renderDay();
   else if (screen === 'unload') renderUnloadForm();
+  else if (screen === 'refuel') renderRefuelForm();
   else renderMain();
 }
 
@@ -381,10 +386,12 @@ function renderMain() {
           el('div', { style: `width:${Math.max(0, Math.min(100, left / tank * 100))}%` })),
           el('div', { class: 's' }, el('span', null, Math.round(Math.max(0, Math.min(1, left / tank)) * 100) + ' %'), el('span', null, 'объём ' + fmt(tank) + ' л'))] : null) : null,
       el('button', { class: 'daystrip', onclick: () => { selectedDate = localDate(); screen = 'day'; render(); } },
-        el('span', null, 'Слито сегодня', el('small', null, 'выгрузок: ' + today.list.length)), el('b', null, el('span', { id: 'total' }, fmt(today.total)), ' л')),
+        el('span', null, 'Слито сегодня', el('small', null, 'выгрузок: ' + today.list.length + (refuelsFor(localDate()).total ? ' · долито газа ' + fmt(refuelsFor(localDate()).total) + ' л' : ''))), el('b', null, el('span', { id: 'total' }, fmt(today.total)), ' л')),
       orderList()),
-    dock(false, el('button', { class: orders.length ? '' : 'main', id: 'new-unload', onclick: () => { if (vehicleReady()) { orderForUnload = null; screen = 'unload'; render(); } } },
-      icon('drop'), orders.length ? 'Выгрузка без заказа' : 'Записать выгрузку')),
+    dock(false, el('div', { class: 'dock-row' },
+      el('button', { class: orders.length ? '' : 'main', id: 'new-unload', onclick: () => { if (vehicleReady()) { orderForUnload = null; screen = 'unload'; render(); } } },
+        icon('drop'), orders.length ? 'Выгрузка без заказа' : 'Записать выгрузку'),
+      el('button', { id: 'new-refuel', 'aria-label': 'Дозаправка цистерны газом', onclick: () => { if (vehicleReady()) { screen = 'refuel'; render(); } } }, icon('fuel'), 'Дозаправка'))),
     tabs('main'));
 }
 
@@ -410,6 +417,10 @@ function renderDay() {
         el('div', { class: 'row point-row' }, el('span', null, name + ' (' + entry.n + ')'), el('b', null, fmt(entry.cl / 100) + ' л')))) : null,
       el('h2', null, 'Выгрузки'),
       list.length ? list.map(renderUnload) : el('p', { class: 'empty' }, 'За этот день выгрузок нет.'),
+      refuelsFor(selectedDate).list.length ? [el('h2', null, 'Дозаправки газом: ', el('span', { id: 'refuel-total' }, fmt(refuelsFor(selectedDate).total)), ' л'),
+        refuelsFor(selectedDate).list.map((r) => el('article', { class: 'trip' + (r.pending ? ' pending' : '') },
+          el('div', { class: 'top2' }, el('span', null, r.station), el('b', null, fmt(r.liters) + ' л')),
+          el('div', { class: 'meta' }, r.plate + ' · ' + new Date(r.ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) + (r.comment ? '. ' + r.comment : '') + (r.pending ? '. Ждёт связи' : ''))))] : null,
       el('h2', null, 'Учётная запись'),
       el('button', { class: 'quiet', id: 'logout', onclick: logout }, 'Выйти из приложения')),
     tabs('day'));
@@ -506,12 +517,59 @@ function renderUnload(u) {
   return el('article', { class: 'trip' + (u.pending ? ' pending' : '') },
     el('div', { class: 'top2' }, el('span', null, u.client), el('b', null, fmt(u.liters) + ' л')),
     el('div', { class: 'meta' }, u.plate + (u.trailer ? ' + ' + u.trailer : '') + (u.paid === 'yes' ? '. Оплачено' : (u.paid === 'no' ? '. Не оплачено' : '')) + (u.comment ? '. ' + u.comment : '')),
+    u.lpg_pct !== null && u.lpg_pct !== undefined ? el('div', { class: 'meta lpg' }, 'В цистерне после выгрузки: ' + fmt(u.lpg_pct) + ' % (датчик)') : null,
     el('div', { class: 'act' },
       el('span', { class: 'meta' }, u.pending ? 'Ждёт связи' : ''),
       canDelete ? el('button', {
         class: 'small quiet',
         onclick: () => ask(`Удалить выгрузку ${u.client}, ${fmt(u.liters)} л?`, 'Удалить', () => deleteUnload(u)),
       }, 'Удалить') : null));
+}
+
+// ----- дозаправка цистерны газом в пути -----
+function refuelsFor(day) {
+  const known = new Set((me().refuels || []).map((r) => r.id));
+  const pending = data.queue.filter((op) => op.type === 'refuel' && !known.has(op.id))
+    .map((op) => ({ id: op.id, plate: op.plate, station: op.station_label, liters: op.liters, ts: op.at, comment: op.comment, pending: true }));
+  const list = pending.concat(me().refuels || []).filter((r) => localDate(new Date(r.ts)) === day)
+    .sort((a, b) => (new Date(a.ts) < new Date(b.ts) ? 1 : -1));
+  return { list, total: list.reduce((sum, r) => sum + Math.round(r.liters * 100), 0) / 100 };
+}
+function renderRefuelForm() {
+  const stations = me().stations || [];
+  const error = el('div', { class: 'error', role: 'alert', id: 'refuel-error' });
+  const station = el('select', { id: 'station' }, el('option', { value: '' }, 'Где дозаправились'),
+    stations.map((st) => el('option', { value: st.id }, st.name + (st.address ? ' — ' + st.address : ''))));
+  if (stations.length === 1) station.value = String(stations[0].id);
+  const liters = el('input', { id: 'refuel-liters', inputmode: 'decimal', autocomplete: 'off' });
+  const comment = el('input', { id: 'refuel-comment', maxlength: 200 });
+  const form = el('form', {
+    id: 'refuel-form',
+    onsubmit: (event) => {
+      event.preventDefault();
+      const st = stations.find((x) => String(x.id) === station.value);
+      if (!st) { error.textContent = 'Выберите точку заправки.'; return; }
+      const value = Number(liters.value.replace(',', '.').trim());
+      if (!Number.isFinite(value) || value <= 0) { error.textContent = 'Укажите, сколько литров газа долили.'; return; }
+      if (value > 200000) { error.textContent = 'Слишком большое значение: не больше 200 000 л.'; return; }
+      const now = new Date();
+      enqueue({ type: 'refuel', id: uuid(), plate: data.plate, station_id: st.id, station_label: st.name,
+        liters: Math.round(value * 100) / 100, at: now.toISOString(), comment: comment.value.trim() });
+      screen = 'main';
+      toast('Дозаправка записана');
+      render();
+      sync();
+    },
+  },
+  el('div', { class: 'target' }, el('b', null, 'Газ в цистерну'), el('div', null, data.plate + (data.trailer ? ' + ' + data.trailer : ''))),
+  stations.length ? [el('label', { for: 'station' }, 'Точка заправки'), station] : el('p', { class: 'empty' }, 'Логист ещё не добавил точки заправки газом.'),
+  el('label', { for: 'refuel-liters' }, 'Сколько газа долили в цистерну, литров'), liters,
+  el('label', { for: 'refuel-comment' }, 'Комментарий, если нужен'), comment,
+  error);
+  show(
+    topBar(() => { screen = 'main'; render(); }),
+    page('solo', el('h1', null, 'Дозаправка газом'), form),
+    stations.length ? dock(true, el('button', { class: 'main', type: 'submit', form: 'refuel-form', id: 'save-refuel' }, icon('check'), 'Записать дозаправку')) : null);
 }
 
 function deleteUnload(u) {
@@ -530,6 +588,7 @@ function describeOp(op) {
   if (!op) return 'Запись';
   if (op.type === 'unload') return `Выгрузка ${op.client_label}, ${fmt(op.liters)} л`;
   if (op.type === 'order_fail') return `Отказ от заказа ${op.label}`;
+  if (op.type === 'refuel') return `Дозаправка газом ${op.station_label}, ${fmt(op.liters)} л`;
   return `Удаление выгрузки ${op.label}`;
 }
 

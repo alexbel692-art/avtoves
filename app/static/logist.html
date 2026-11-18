@@ -305,7 +305,7 @@ async function render() {
       : manager
         ? [['', [['home', 'Сводка'], ['notices', badge], ['report', 'Выгрузки']]], ['Настройки', [['logists', 'Мой пароль']]]]
         : [['', [['home', 'Сводка'], ['notices', badge], ['requests', 'Заявки amoCRM'], ['map', 'Карта'], ['orders', 'Заказы']]],
-          ['Учёт', [['report', 'Выгрузки'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания']]],
+          ['Учёт', [['report', 'Выгрузки'], ['refuels', 'Дозаправки газом'], ['legs', 'Сверка с весами'], ['weighings', 'Взвешивания']]],
           ['Настройки', [['logists', 'Мой пароль']]]];      // раздел «Клиенты» пока скрыт
     const tabs = groups.flatMap(([, items]) => items);
     if (!tabs.some(([id]) => id === tab)) tab = tabs[0][0];
@@ -315,7 +315,7 @@ async function render() {
       el('nav', { 'aria-label': 'Разделы' }, groups.map(([name, items]) => [name ? el('div', { class: 'group' }, name) : null,
         items.map(([id, label]) => el('button', { 'data-tab': id, 'aria-current': tab === id ? 'page' : null, onclick: () => { tab = id; render(); } }, label))])),
       el('div', { class: 'who' }, el('div', null, me.name || me.login), el('button', { id: 'logout', onclick: () => { setToken(null); dashMonth = null; render(); } }, 'Выйти (' + me.login + ')')));
-    const body = await ({ home: renderHome, notices: renderNotices, map: renderMap, orders: renderOrders, requests: renderRequests, amocrm: renderAmo, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting, driverapp: renderDriverApp })[tab]();
+    const body = await ({ home: renderHome, notices: renderNotices, map: renderMap, orders: renderOrders, requests: renderRequests, refuels: renderRefuels, amocrm: renderAmo, report: renderReport, legs: renderLegs, weighings: renderWeighings, clients: renderClients, drivers: renderDrivers, logists: renderLogists, stavtrack: renderStavtrack, routing: renderRouting, driverapp: renderDriverApp })[tab]();
     if (run !== renderCount) return;
     view.className = 'app';
     view.replaceChildren(head, el('main', { class: 'page' }, el('h1', null, title), body));
@@ -683,10 +683,10 @@ async function renderReport() {
     el('p', { class: 'figures' }, el('b', { id: 'r-total' }, fmt(rep.total)), ' л, выгрузок: ', el('span', { id: 'r-count' }, rep.count)),
     el('div', { class: 'columns' }, totals('По клиентам', rep.by_client), totals('По водителям', rep.by_driver), totals('По машинам', rep.by_plate), totals('По прицепам', rep.by_trailer)),
     el('section', null, el('h2', null, 'Выгрузки'), rep.unloads.length ? el('div', { class: 'scroll' }, el('table', { id: 'unloads' },
-      el('thead', null, el('tr', null, ['Время', 'Водитель', 'Машина', 'Клиент'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Литры'), ['Счёт или оплата', 'Пломба, талон', 'Комментарий', ''].map((t) => el('th', null, t)))),
+      el('thead', null, el('tr', null, ['Время', 'Водитель', 'Машина', 'Клиент'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Литры'), ['Счёт или оплата', 'Пломба, талон'].map((t) => el('th', null, t)), el('th', { class: 'num', title: 'По датчику ППМ через Ставтрэк сразу после выгрузки' }, 'СУГ после, %'), ['Комментарий', ''].map((t) => el('th', null, t)))),
       el('tbody', null, rep.unloads.map((u) => el('tr', null, el('td', null, when(u.ts)), el('td', null, u.driver), el('td', null, u.plate + (u.trailer ? ' + ' + u.trailer : '')),
         el('td', null, u.client), el('td', { class: 'num' }, fmt(u.liters)),
-        el('td', null, { pending: 'счёт нужно выставить', done: 'счёт выставлен' }[u.invoice] || (u.paid === 'no' ? el('span', { class: 'bad' }, 'не оплачено') : (u.paid === 'yes' ? 'оплачено' : ''))), el('td', null, sealText(u)), el('td', null, u.comment),
+        el('td', null, { pending: 'счёт нужно выставить', done: 'счёт выставлен' }[u.invoice] || (u.paid === 'no' ? el('span', { class: 'bad' }, 'не оплачено') : (u.paid === 'yes' ? 'оплачено' : ''))), el('td', null, sealText(u)), el('td', { class: 'num', title: u.lpg_note || null }, u.lpg_pct !== null && u.lpg_pct !== undefined ? fmt(u.lpg_pct) + ' %' : (u.lpg_note ? el('small', null, '—') : '')), el('td', null, u.comment),
         el('td', null, me.role === 'manager' ? null : el('div', { class: 'actions' }, el('button', { onclick: () => editUnload(u) }, 'Изменить'),
           el('button', { onclick: () => confirmBox(`Удалить выгрузку: ${u.driver}, ${u.client}, ${fmt(u.liters)} л?`, 'Удалить', () => api('/api/logist/unloads/' + u.id, 'DELETE')) }, 'Удалить'))))))))
       : el('p', { class: 'empty' }, 'За выбранный период выгрузок нет.')));
@@ -768,7 +768,8 @@ async function renderRequests() {
   const state = (l) => ({
     new: 'У водителя в приложении',
     done: [el('span', { class: 'good' }, 'Выполнена: ' + fmt(l.fact) + ' л' + (l.paid === 'no' ? ', не оплачено' : (l.paid === 'yes' ? ', оплачено' : ''))),
-      sealText(l) ? el('div', { class: 'seal' }, sealText(l)) : null],
+      sealText(l) ? el('div', { class: 'seal' }, sealText(l)) : null,
+      l.lpg_pct !== null && l.lpg_pct !== undefined ? el('div', { class: 'seal' }, 'СУГ после выгрузки: ' + fmt(l.lpg_pct) + ' %') : null],
     failed: el('span', { class: 'bad' }, 'Не выполнена: ' + l.reason),
   })[l.order_status] || el('span', { class: 'bad' }, 'Водитель не назначен');
   const driverCell = (l) => {
@@ -921,7 +922,7 @@ async function renderWeighings() {
         el('td', { class: 'num' }, fmt(w.weight)),
         el('td', { class: 'num' }, w.fuel !== null && w.fuel !== undefined ? fmt(w.fuel) : el('small', null, w.fuel_note)),
         el('td', { class: 'num gas-cell' }, w.gas ? [fmt(w.gas.l) + ' л', el('br'), el('small', null, fmt(w.gas.kg) + ' кг' + (w.gas.fuel_counted ? ', без топлива' : ', топливо не учтено'))] : el('small', null, 'нет тары')),
-        el('td', { class: 'lpg-cell' }, w.lpg.length ? w.lpg.map((x, i) => [i ? el('br') : null, (x.src === 'прицеп' ? 'Бочка: ' : '') + x.name + ': ', el('b', null, sensorValue(x))]) : el('small', null, '—')),
+        el('td', { class: 'lpg-cell' }, w.lpg_pct !== null && w.lpg_pct !== undefined ? [el('b', { class: 'lpg-pct' }, fmt(w.lpg_pct) + ' %'), el('br')] : null, w.lpg.length ? w.lpg.map((x, i) => [i ? el('br') : null, (x.src === 'прицеп' ? 'Бочка: ' : '') + x.name + ': ', el('b', null, sensorValue(x))]) : el('small', null, '—')),
         el('td', null, w.photos.length ? el('button', { onclick: () => showPhotos(w) }, 'Смотреть (' + w.photos.length + ')') : el('span', { class: 'bad' }, 'нет фото')))))))
       : el('p', { class: 'empty' }, 'За эти дни взвешиваний нет.'));
 }
@@ -1171,6 +1172,40 @@ async function renderStavtrack() {
         el('td', null, el('button', { onclick: () => link(v) }, 'Выбрать устройство'))))))) : null);
 }
 
+// ----- заправки -----
+const refuelFilter = { from: today, to: today };
+async function renderRefuels() {
+  const [r, stations] = await Promise.all([api('/api/logist/refuels?' + query(refuelFilter)), api('/api/logist/stations')]);
+  const set = (key) => (e) => { refuelFilter[key] = e.target.value; render(); };
+  const editStation = (st) => form(st ? 'Точка заправки газом' : 'Новая точка заправки газом', [
+    { name: 'name', label: 'Название (так увидит водитель)', value: st ? st.name : '', maxlength: 120 },
+    { name: 'address', label: 'Адрес', value: st ? st.address : '', maxlength: 300 },
+  ].concat(st ? [{ name: 'active', label: 'Показывать водителям', value: st.active ? '1' : '0', options: [{ value: '1', label: 'Да' }, { value: '0', label: 'Нет' }] }] : []),
+  st ? 'Сохранить' : 'Добавить', (v) => api('/api/logist/stations', 'POST', { id: st ? st.id : undefined, name: v.name, address: v.address, active: st ? v.active === '1' : true }));
+  return el('div', null,
+    el('div', { class: 'controls' },
+      el('label', null, 'С даты', el('input', { type: 'date', value: refuelFilter.from, onchange: set('from') })),
+      el('label', null, 'По дату', el('input', { type: 'date', value: refuelFilter.to, onchange: set('to') })),
+      el('button', { class: 'primary', id: 'add-station', onclick: () => editStation(null) }, 'Добавить точку заправки')),
+    el('p', { class: 'note' }, 'Водитель отмечает в приложении, сколько газа долил в цистерну в пути: точка и литры. Долитый газ учитывается в остатке цистерны и в сверке с весами: отвезено = при выезде + долито − при возврате.'),
+    el('p', { class: 'figures' }, el('b', { id: 'rf-total' }, fmt(r.total)), ' л газа долито, дозаправок: ', r.refuels.length),
+    el('div', { class: 'columns' },
+      el('div', null, el('h2', null, 'По дням'), r.days.length ? el('table', { id: 'rf-days' },
+        el('thead', null, el('tr', null, el('th', null, 'День'), el('th', { class: 'num' }, 'Литры'), el('th', null, 'Водители'))),
+        el('tbody', null, r.days.map((d) => el('tr', null, el('td', null, d.day.split('-').reverse().join('.')), el('td', { class: 'num' }, fmt(d.liters) + ` (${d.count})`),
+          el('td', null, Object.entries(d.drivers).map(([n, l]) => n + ': ' + fmt(l) + ' л').join('; '))))))
+        : el('p', { class: 'empty' }, 'За период дозаправок нет.')),
+      el('div', null, el('h2', null, 'Точки заправки'), stations.length ? el('table', { id: 'stations' },
+        el('tbody', null, stations.map((st) => el('tr', { class: st.active ? null : 'off' }, el('td', null, el('b', null, st.name), st.address ? el('div', null, el('small', null, st.address)) : null),
+          el('td', null, el('button', { onclick: () => editStation(st) }, 'Изменить'))))))
+        : el('p', { class: 'empty' }, 'Добавьте точки, где водители могут дозаправить цистерну газом.'))),
+    r.refuels.length ? el('section', null, el('h2', null, 'Дозаправки'), el('div', { class: 'scroll' }, el('table', { id: 'refuels' },
+      el('thead', null, el('tr', null, ['Время', 'Водитель', 'Машина', 'Точка'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Газа, л'), ['Комментарий', ''].map((t) => el('th', null, t)))),
+      el('tbody', null, r.refuels.map((x) => el('tr', null, el('td', null, when(x.ts)), el('td', null, x.driver), el('td', null, x.plate), el('td', null, x.station),
+        el('td', { class: 'num' }, fmt(x.liters)), el('td', null, x.comment),
+        el('td', null, el('button', { onclick: () => confirmBox(`Удалить дозаправку: ${x.driver}, ${fmt(x.liters)} л газа?`, 'Удалить', () => api('/api/logist/refuels/' + encodeURIComponent(x.id), 'DELETE')) }, 'Удалить')))))))) : null);
+}
+
 // ----- сверка -----
 async function renderLegs() {
   const rows = await api('/api/logist/legs?' + query(legFilter));
@@ -1180,12 +1215,12 @@ async function renderLegs() {
     el('div', { class: 'controls' },
       el('label', null, 'Выезд с даты', el('input', { type: 'date', value: legFilter.from, onchange: set('from') })),
       el('label', null, 'По дату', el('input', { type: 'date', value: legFilter.to, onchange: set('to') }))),
-    el('p', { class: 'note' }, `Поездка считается от взвешивания «уехал с базы» до следующего «приехал». Расхождением считается разница больше ${fmt(me.tolerance.tolerance_pct)} % и больше ${fmt(me.tolerance.tolerance_l)} л: литры по весам пересчитаны из килограммов по плотности.`),
+    el('p', { class: 'note' }, `Поездка считается от взвешивания «уехал с базы» до следующего «приехал»; газ, долитый в пути, прибавляется к отвезённому по весам. Расхождением считается разница больше ${fmt(me.tolerance.tolerance_pct)} % и больше ${fmt(me.tolerance.tolerance_l)} л: литры по весам пересчитаны из килограммов по плотности.`),
     rows.length ? el('div', { class: 'scroll' }, el('table', { id: 'legs' },
       el('thead', null, el('tr', null, ['Выезд', 'Возврат', 'Машина', 'Водитель'].map((t) => el('th', null, t)),
-        ['При выезде, л', 'При возврате, л', 'Топливо, л', 'По весам, л', 'По водителю, л', 'Разница, л'].map((t) => el('th', { class: 'num' }, t)), el('th', null, 'Итог'))),
+        ['При выезде, л', 'Долито в пути, л', 'При возврате, л', 'Топливо, л', 'По весам, л', 'По водителю, л', 'Разница, л'].map((t) => el('th', { class: 'num' }, t)), el('th', null, 'Итог'))),
       el('tbody', null, rows.map((g) => el('tr', null, el('td', null, when(g.start)), el('td', null, when(g.end)), el('td', null, g.plate + (g.trailer ? ' + ' + g.trailer : '')), el('td', null, g.driver),
-        el('td', { class: 'num' }, fmt(g.out_l)), el('td', { class: 'num' }, fmt(g.in_l)),
+        el('td', { class: 'num' }, fmt(g.out_l)), el('td', { class: 'num' }, g.refuel_l ? '+' + fmt(g.refuel_l) : ''), el('td', { class: 'num' }, fmt(g.in_l)),
         el('td', { class: 'num', title: g.fuel_fix_l === null ? 'Нет показаний ДУТ на обоих взвешиваниях' : `ДУТ: ${fmt(g.fuel_out)} л при выезде, ${fmt(g.fuel_in)} л при возврате` }, g.fuel_fix_l === null ? '' : '−' + fmt(g.fuel_fix_l)),
         el('td', { class: 'num' }, fmt(g.scale_l)),
         el('td', { class: 'num' }, fmt(g.driver_l) + ` (${g.unloads})`), el('td', { class: 'num' + (g.status === 'bad' ? ' bad' : '') }, fmt(g.diff_l)), el('td', null, status(g)))))))

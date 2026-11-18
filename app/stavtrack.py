@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS weigh_fuel (
     note      TEXT NOT NULL DEFAULT '',
     lpg       TEXT NOT NULL DEFAULT ''   -- показания датчиков СУГ (JSON)
 );
+-- Сколько СУГ осталось в цистерне сразу после выгрузки клиенту (датчик ППМ через Ставтрэк)
+CREATE TABLE IF NOT EXISTS unload_lpg (
+    unload_id TEXT PRIMARY KEY,
+    pct       REAL,                      -- заполнение цистерны, %
+    readings  TEXT NOT NULL DEFAULT '[]',
+    note      TEXT NOT NULL DEFAULT '',
+    taken     TEXT NOT NULL
+);
 """
 LOOKALIKE = str.maketrans("ABEKMHOPCTYX", "АВЕКМНОРСТУХ")
 
@@ -59,6 +67,25 @@ def clean(v):
         return round(v, 2) if isinstance(v, float) else v
     text = str(v).strip()
     return text[:40] if text else None
+
+
+def lpg_pct(readings: list[dict], tanks: dict) -> float | None:
+    """Заполнение цистерны в процентах по показаниям датчиков СУГ.
+    Датчик в % — берётся как есть; в литрах — делится на объём цистерны из справочника ТС.
+    Бочка (прицеп) важнее машины: газ везут в ней."""
+    order = sorted(readings, key=lambda r: r.get("src") != "прицеп")
+    for r in order:
+        v, unit, name = r.get("value"), str(r.get("unit") or "").lower(), str(r.get("name") or "").lower()
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        if "%" in unit or ("%" in name and not unit):
+            if 0 <= v <= 110:
+                return round(float(v), 1)
+        elif unit in ("л", "l", "литр", "литры", "литров") or "объ" in name:
+            tank = tanks.get(r.get("src"))
+            if tank and v >= 0:
+                return round(float(v) / float(tank) * 100, 1)
+    return None
 
 
 class StError(Exception):
@@ -289,6 +316,47 @@ class Stavtrack:
                 if any(w in r["name"].lower() for w in words):
                     out.append({**r, "src": who})
         return out
+
+    def tanks(self, plate: str, trailer: str = "") -> dict:
+        out = {}
+        for who, number in (("машина", plate), ("прицеп", trailer)):
+            v = self.db.vehicle(number) if number else None
+            if v and v.get("tank_l"):
+                out[who] = v["tank_l"]
+        return out
+
+    # ---- вызывается после каждой выгрузки клиенту: сколько СУГ осталось в цистерне
+    def on_unload(self, unload_id: str, plate: str, trailer: str, ts: str):
+        if not plate or not self.ready():
+            return
+
+        def work():
+            now = datetime.now()
+            note, readings, pct = "", [], None
+            try:
+                moment = datetime.fromisoformat(ts)
+            except ValueError:
+                moment = now
+            # Выгрузку отправили без связи и позже: нынешнее показание к ней уже не относится
+            if (now - moment).total_seconds() > float(self.settings()["max_age_min"]) * 60:
+                note = "выгрузка пришла позже — показание датчика не взято"
+            else:
+                try:
+                    readings = self.lpg_readings(plate, trailer)
+                    pct = lpg_pct(readings, self.tanks(plate, trailer))
+                    if not readings:
+                        note = "нет показаний датчиков СУГ"
+                    elif pct is None:
+                        note = "датчик не в % и не указан объём цистерны"
+                except StError as ex:
+                    note = str(ex)
+                except Exception:  # noqa: BLE001 — выгрузка не должна зависеть от Ставтрэка
+                    log.exception("Ошибка запроса датчиков СУГ при выгрузке")
+                    note = "ошибка запроса к Ставтрэку"
+            self.db.x("INSERT OR REPLACE INTO unload_lpg(unload_id, pct, readings, note, taken) VALUES(?,?,?,?,?)",
+                      (unload_id, pct, json.dumps(readings, ensure_ascii=False), note,
+                       now.isoformat(timespec="seconds")))
+        threading.Thread(target=work, name="stavtrack-lpg", daemon=True).start()
 
     # ---- вызывается после каждого взвешивания
     def on_weighing(self, weighing_id: int, plate: str):
