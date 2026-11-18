@@ -39,6 +39,9 @@ button.go { background: var(--ok); color: #fff; box-shadow: none; font-size: 19p
 button.quiet { background: transparent; }
 button.small { width: auto; min-height: 48px; font-size: 16px; padding: 4px 14px; }
 button.on-choice { background: var(--ink); color: #fff; box-shadow: none; }
+label.check-row { display: flex; align-items: center; gap: 14px; background: var(--paper); border: 2px solid var(--line, #cfd8df); border-radius: 14px; padding: 14px 16px; margin-top: 16px; color: var(--ink); font-size: 18px; min-height: 64px; cursor: pointer; }
+label.check-row input { width: 28px; height: 28px; margin: 0; accent-color: var(--blue); flex: none; }
+label.check-row:has(input:checked) { border-color: var(--blue); background: var(--blue-soft); }
 
 /* верхняя строка */
 .top { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 10px 14px 8px; display: flex; align-items: center; gap: 10px; }

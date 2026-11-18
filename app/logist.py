@@ -38,6 +38,14 @@ MAX_LITERS = 200_000
 DRIVER_DAYS = 365          # водитель входит один раз
 LOGIST_DAYS = 14
 BACKDATE_DAYS = 60
+# Цвета водителей на доске заявок: заметные, различимые, с тёмным текстом на светлом фоне строки
+DRIVER_COLORS = ["#1d5fbf", "#e8590c", "#2b8a3e", "#ae3ec9", "#c92a2a", "#0c8599", "#f08c00", "#5f3dc4",
+                 "#a61e4d", "#5c940d", "#364fc7", "#862e9c"]
+
+
+def driver_color(d: dict) -> str:
+    c = (d.get("color") or "").strip()
+    return c if re.fullmatch(r"#[0-9a-fA-F]{6}", c) else DRIVER_COLORS[(int(d["id"]) - 1) % len(DRIVER_COLORS)]
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS clients (
@@ -283,7 +291,10 @@ def init_db(db):
                 ("orders", [("lat", "REAL"), ("lon", "REAL"), ("geo_precision", "TEXT NOT NULL DEFAULT ''"),
                             ("phone", "TEXT NOT NULL DEFAULT ''"), ("amo_lead_id", "INTEGER")]),
                 ("unloads", [("order_id", "INTEGER"), ("paid", "TEXT NOT NULL DEFAULT ''"), ("paid_at", "TEXT"),
-                             ("paid_by", "TEXT NOT NULL DEFAULT ''")]),
+                             ("paid_by", "TEXT NOT NULL DEFAULT ''"),
+                             ("seal", "TEXT NOT NULL DEFAULT ''"),        # номер пломбы на ёмкости клиента
+                             ("warranty", "INTEGER")]),                   # гарантийный талон: 1 / 0 / NULL — не указано
+                ("drivers", [("color", "TEXT NOT NULL DEFAULT ''")]),
                 ("logists", [("role", "TEXT NOT NULL DEFAULT 'logist'")])):
             have = {r[1] for r in db.conn.execute(f"PRAGMA table_info({table})")}
             for col, ddl in cols:
@@ -540,7 +551,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         return {"id": r["id"], "client_id": r["client_id"], "client": r["client"], "liters": r["liters"],
                 "ts": r["ts"], "plate": r["plate"], "trailer": r["trailer"], "comment": r["comment"],
                 "driver": r["driver"], "driver_id": r["driver_id"], "invoice": r["invoice"],
-                "paid": r.get("paid") or "", "order_id": r.get("order_id")}
+                "paid": r.get("paid") or "", "order_id": r.get("order_id"),
+                "seal": r.get("seal") or "", "warranty": r.get("warranty")}
 
     def combo_of(driver: dict) -> tuple[str, str]:
         last = db.q("SELECT plate, trailer FROM weighings WHERE driver_id=? ORDER BY id DESC LIMIT 1", (driver["id"],))
@@ -674,6 +686,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
         amount = liters_value(op.get("liters"))
         ts = local_ts(op.get("at"))
         comment = text(op.get("comment"), "Комментарий", 200, required=False)
+        seal = text(op.get("seal"), "Номер пломбы", 40, required=False)
+        warranty = int(op["warranty"]) if isinstance(op.get("warranty"), bool) else None
         order = None
         if op.get("order_id") is not None:
             found = db.q("SELECT * FROM orders WHERE id=?", (op["order_id"],))
@@ -693,10 +707,10 @@ def build_routes(ctx, public: bool) -> list[Route]:
             raise Bad("Укажите, оплатил ли клиент")
         if client["legal"] or (client["reviewed"] and not client["private"]):
             paid = ""          # юрлицу выставляют счёт, на своих объектах оплаты нет
-        db.x("INSERT INTO unloads(id,driver_id,driver,plate,trailer,client_id,liters,ts,comment,created,order_id,paid) "
-             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        db.x("INSERT INTO unloads(id,driver_id,driver,plate,trailer,client_id,liters,ts,comment,created,order_id,paid,"
+             "seal,warranty) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
              (uid, d["id"], d["name"], plate, trailer, cid, amount, ts, comment, now_iso(),
-              order["id"] if order else None, paid))
+              order["id"] if order else None, paid, seal, warranty))
         if order:
             db.x("UPDATE orders SET status='done', closed=?, unload_id=?, reason='' WHERE id=?", (ts, uid, order["id"]))
         refresh_invoice(uid)
@@ -1030,7 +1044,8 @@ def build_routes(ctx, public: bool) -> list[Route]:
                 "vehicles": [{"plate": v["plate"]} for v in vs], "managers": []})
         return JSONResponse({
             "managers": managers,
-            "drivers": db.q("SELECT id,name,login,active,plate,(pass_hash<>'') AS has_password FROM drivers ORDER BY name"),
+            "drivers": [r | {"color": driver_color(r)} for r in db.q(
+                "SELECT id,name,login,active,plate,color,(pass_hash<>'') AS has_password FROM drivers ORDER BY name")],
             "clients": db.q("SELECT * FROM clients ORDER BY active DESC, name"),
             "vehicles": [{"plate": v["plate"], "kind": v.get("kind") or "", "tank_l": v.get("tank_l"),
                           "tare": v.get("tare")} for v in vs],
@@ -1059,14 +1074,16 @@ def build_routes(ctx, public: bool) -> list[Route]:
                 ws.append([safe_cell(item["name"]), item["liters"], item["count"]])
         ws.column_dimensions["A"].width = 34
         sh = wb.create_sheet("Выгрузки")
-        sh.append(["Дата и время", "Водитель", "Машина", "Прицеп", "Клиент", "Литры", "Счёт", "Комментарий", "Оплата"])
+        sh.append(["Дата и время", "Водитель", "Машина", "Прицеп", "Клиент", "Литры", "Счёт", "Комментарий", "Оплата",
+                   "Номер пломбы", "Гарантийный талон"])
         for c in sh[1]:
             c.font = bold
         for u in data["unloads"]:
             sh.append([u["ts"].replace("T", " "), safe_cell(u["driver"]), u["plate"], u["trailer"], safe_cell(u["client"]),
                        u["liters"], {"pending": "нужно выставить", "done": "выставлен"}.get(u["invoice"], ""),
-                       safe_cell(u["comment"]), {"yes": "оплачено", "no": "не оплачено"}.get(u["paid"], "")])
-        for col, w in zip("ABCDEFGHI", (20, 26, 14, 14, 30, 12, 18, 40, 14)):
+                       safe_cell(u["comment"]), {"yes": "оплачено", "no": "не оплачено"}.get(u["paid"], ""),
+                       safe_cell(u["seal"]), {1: "выдан", 0: "не выдан"}.get(u["warranty"], "")])
+        for col, w in zip("ABCDEFGHIJK", (20, 26, 14, 14, 30, 12, 18, 40, 14, 16, 18)):
             sh.column_dimensions[col].width = w
         lg = wb.create_sheet("Сверка с весами")
         lg.append(["Выезд", "Возврат", "Машина", "Прицеп", "Водитель", "При выезде, л", "При возврате, л",
@@ -1112,6 +1129,11 @@ def build_routes(ctx, public: bool) -> list[Route]:
                 db.x("UPDATE unloads SET comment=? WHERE id=?", (text(b["comment"], "Комментарий", 200, False), uid))
             if b.get("client_id") is not None:
                 db.x("UPDATE unloads SET client_id=? WHERE id=?", (client_id_for(b), uid))
+            if "seal" in b:
+                db.x("UPDATE unloads SET seal=? WHERE id=?", (text(b["seal"], "Номер пломбы", 40, False), uid))
+            if "warranty" in b:
+                w = b["warranty"]
+                db.x("UPDATE unloads SET warranty=? WHERE id=?", (int(w) if isinstance(w, bool) else None, uid))
         refresh_invoice(uid)
         ctx.ctrl.event(f"Логист {u['login']}: выгрузка {'удалена' if request.method == 'DELETE' else 'исправлена'}")
         return JSONResponse({"ok": True})
@@ -1173,16 +1195,25 @@ def build_routes(ctx, public: bool) -> list[Route]:
         if clash and clash[0]["id"] != did:
             raise Bad("Такой логин уже есть", 409)
         active = int(b.get("active", True) is not False)
+        color = str(b.get("color") or "").strip()
+        if color and not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            raise Bad("Цвет: выберите цвет из палитры")
         if did:
             if not db.driver(int(did)):
                 raise Bad("Водитель не найден", 404)
             db.x("UPDATE drivers SET name=?, login=?, active=? WHERE id=?", (name, login, active, did))
+            if color:
+                db.x("UPDATE drivers SET color=? WHERE id=?", (color.lower(), did))
             if b.get("password"):
                 db.x("UPDATE drivers SET pass_hash=? WHERE id=?", (new_password(b["password"]), did))
         else:
             # PIN для страницы в сети весовой не задан: вместо него случайная заглушка
             did = db.x("INSERT INTO drivers(name,login,pass_hash,active,pin_hash) VALUES(?,?,?,?,?)",
                        (name, login, new_password(b.get("password")), active, "nopin:" + secrets.token_hex(16)))
+            # Свой цвет на доске заявок: первый, которого ещё нет у работающих водителей
+            busy = {driver_color(r) for r in db.q("SELECT id, color FROM drivers WHERE active=1 AND id<>?", (did,))}
+            free = [c for c in DRIVER_COLORS if c not in busy]
+            db.x("UPDATE drivers SET color=? WHERE id=?", ((color or (free or DRIVER_COLORS)[0]).lower(), did))
         return JSONResponse({"ok": True, "id": did})
 
     # ---- логисты
@@ -1547,11 +1578,12 @@ def build_routes(ctx, public: bool) -> list[Route]:
         day = request.query_params.get("day") or datetime.now().strftime("%Y-%m-%d")
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
             raise Bad("Некорректная дата")
-        rows = db.q("SELECT a.*, o.status AS order_status, o.driver_id, o.reason, d.name AS driver, un.liters AS fact, "
-                    "un.paid, un.plate AS fact_plate FROM amo_leads a LEFT JOIN orders o ON o.id=a.order_id LEFT JOIN drivers d ON d.id=o.driver_id "
+        rows = db.q("SELECT a.*, o.status AS order_status, o.driver_id, o.reason, d.name AS driver, d.color AS dcolor, "
+                    "un.liters AS fact, "
+                    "un.paid, un.seal, un.warranty, un.plate AS fact_plate FROM amo_leads a LEFT JOIN orders o ON o.id=a.order_id LEFT JOIN drivers d ON d.id=o.driver_id "
                     "LEFT JOIN unloads un ON un.id=o.unload_id WHERE a.day=? AND a.lost=0 "
                     "ORDER BY a.base, a.highway, a.district, a.lead_id", (day,))
-        drivers = [{"id": d["id"], "name": d["name"], "plate": combo_of(d)[0]}
+        drivers = [{"id": d["id"], "name": d["name"], "plate": combo_of(d)[0], "color": driver_color(d)}
                    for d in db.q("SELECT * FROM drivers WHERE active=1 AND login<>'' ORDER BY name")]
         plates = {d["id"]: d["plate"] for d in drivers}
         s_ = amo.public()
@@ -1559,6 +1591,9 @@ def build_routes(ctx, public: bool) -> list[Route]:
             r["plate"] = (r.pop("fact_plate") or plates.get(r["driver_id"], "")) if r["order_status"] == "done" \
                 else plates.get(r["driver_id"], "") if r["order_status"] == "new" else ""
             r.pop("fact_plate", None)
+            dcolor = r.pop("dcolor", None)
+            r["color"] = driver_color({"id": r["driver_id"], "color": dcolor}) \
+                if r["driver_id"] and r["order_status"] in ("new", "done") else ""
             r["url"] = f"https://{s_['domain']}/leads/detail/{r['lead_id']}" if s_["domain"] else ""
         days = db.q("SELECT day, COUNT(*) AS n, SUM(CASE WHEN order_id IS NULL THEN 1 ELSE 0 END) AS free FROM amo_leads "
                     "WHERE lost=0 AND day BETWEEN date(?, '-7 day') AND date(?, '+14 day') GROUP BY day ORDER BY day",

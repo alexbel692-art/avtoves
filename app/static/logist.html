@@ -140,6 +140,14 @@ details.tableview summary { cursor:pointer; color:var(--muted); }
 #requests .plate { font-size:13px; font-weight:700; margin-top:4px; }
 #requests td.state { min-width:120px; font-size:14px; }
 #requests tr.free td:first-child { box-shadow:inset 4px 0 0 #f0a000; }
+#requests tr.drv td { background:color-mix(in srgb, var(--drv) 13%, #fff); border-bottom-color:color-mix(in srgb, var(--drv) 30%, #fff); }
+#requests tr.drv:hover td { background:color-mix(in srgb, var(--drv) 20%, #fff); }
+#requests tr.drv td:first-child { box-shadow:inset 6px 0 0 var(--drv); }
+#requests tr.drv select { border-color:var(--drv); border-width:2px; font-weight:600; }
+.drv-legend { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 12px; }
+.drv-legend span { display:inline-flex; align-items:center; gap:7px; background:var(--paper); border:1px solid var(--line); border-radius:20px; padding:4px 12px 4px 6px; font-size:14px; }
+.drv-legend i, .swatch { width:16px; height:16px; border-radius:50%; background:var(--drv); display:inline-block; flex:none; }
+.seal { font-size:13px; color:var(--ink); }
 .pick-list { max-height:50vh; overflow:auto; border:1px solid var(--line); border-radius:8px; }
 .pick-list td { padding:5px 8px; }
 .pick-list input[type=text] { min-height:32px; width:120px; }
@@ -656,8 +664,10 @@ async function renderReport() {
   const editUnload = (u) => form('Изменить выгрузку', [
     { name: 'liters', label: 'Литры', value: u.liters, inputmode: 'decimal' },
     { name: 'client_id', label: 'Клиент', value: u.client_id, options: refs.clients.map((c) => ({ value: c.id, label: c.name })) },
+    { name: 'seal', label: 'Номер пломбы', value: u.seal, maxlength: 40 },
+    { name: 'warranty', label: 'Гарантийный талон', value: u.warranty === 1 ? '1' : (u.warranty === 0 ? '0' : ''), options: [{ value: '', label: 'Не указано' }, { value: '1', label: 'Выдан' }, { value: '0', label: 'Не выдан' }] },
     { name: 'comment', label: 'Комментарий', value: u.comment, maxlength: 200 },
-  ], 'Сохранить', (v) => api('/api/logist/unloads/' + u.id, 'PATCH', { liters: v.liters, client_id: Number(v.client_id), comment: v.comment }));
+  ], 'Сохранить', (v) => api('/api/logist/unloads/' + u.id, 'PATCH', { liters: v.liters, client_id: Number(v.client_id), comment: v.comment, seal: v.seal, warranty: v.warranty === '' ? null : v.warranty === '1' }));
   return el('div', null,
     el('div', { class: 'controls' },
       el('label', null, 'С даты', el('input', { type: 'date', value: filter.from, onchange: set('from') })),
@@ -669,10 +679,10 @@ async function renderReport() {
     el('p', { class: 'figures' }, el('b', { id: 'r-total' }, fmt(rep.total)), ' л, выгрузок: ', el('span', { id: 'r-count' }, rep.count)),
     el('div', { class: 'columns' }, totals('По клиентам', rep.by_client), totals('По водителям', rep.by_driver), totals('По машинам', rep.by_plate), totals('По прицепам', rep.by_trailer)),
     el('section', null, el('h2', null, 'Выгрузки'), rep.unloads.length ? el('div', { class: 'scroll' }, el('table', { id: 'unloads' },
-      el('thead', null, el('tr', null, ['Время', 'Водитель', 'Машина', 'Клиент'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Литры'), ['Счёт или оплата', 'Комментарий', ''].map((t) => el('th', null, t)))),
+      el('thead', null, el('tr', null, ['Время', 'Водитель', 'Машина', 'Клиент'].map((t) => el('th', null, t)), el('th', { class: 'num' }, 'Литры'), ['Счёт или оплата', 'Пломба, талон', 'Комментарий', ''].map((t) => el('th', null, t)))),
       el('tbody', null, rep.unloads.map((u) => el('tr', null, el('td', null, when(u.ts)), el('td', null, u.driver), el('td', null, u.plate + (u.trailer ? ' + ' + u.trailer : '')),
         el('td', null, u.client), el('td', { class: 'num' }, fmt(u.liters)),
-        el('td', null, { pending: 'счёт нужно выставить', done: 'счёт выставлен' }[u.invoice] || (u.paid === 'no' ? el('span', { class: 'bad' }, 'не оплачено') : (u.paid === 'yes' ? 'оплачено' : ''))), el('td', null, u.comment),
+        el('td', null, { pending: 'счёт нужно выставить', done: 'счёт выставлен' }[u.invoice] || (u.paid === 'no' ? el('span', { class: 'bad' }, 'не оплачено') : (u.paid === 'yes' ? 'оплачено' : ''))), el('td', null, sealText(u)), el('td', null, u.comment),
         el('td', null, me.role === 'manager' ? null : el('div', { class: 'actions' }, el('button', { onclick: () => editUnload(u) }, 'Изменить'),
           el('button', { onclick: () => confirmBox(`Удалить выгрузку: ${u.driver}, ${u.client}, ${fmt(u.liters)} л?`, 'Удалить', () => api('/api/logist/unloads/' + u.id, 'DELETE')) }, 'Удалить'))))))))
       : el('p', { class: 'empty' }, 'За выбранный период выгрузок нет.')));
@@ -730,6 +740,7 @@ async function renderOrders() {
 }
 
 // ----- заявки из amoCRM -----
+const sealText = (u) => [u.seal ? 'пломба № ' + u.seal : '', u.warranty === 1 ? 'талон выдан' : (u.warranty === 0 ? 'без талона' : '')].filter(Boolean).join(', ');
 let reqDay = today;
 let reqBase = '';
 let reqMsg = null;
@@ -751,7 +762,8 @@ async function renderRequests() {
   const active = (l) => l.order_status === 'new' || l.order_status === 'done';
   const state = (l) => ({
     new: 'У водителя в приложении',
-    done: el('span', { class: 'good' }, 'Выполнена: ' + fmt(l.fact) + ' л' + (l.paid === 'no' ? ', не оплачено' : (l.paid === 'yes' ? ', оплачено' : ''))),
+    done: [el('span', { class: 'good' }, 'Выполнена: ' + fmt(l.fact) + ' л' + (l.paid === 'no' ? ', не оплачено' : (l.paid === 'yes' ? ', оплачено' : ''))),
+      sealText(l) ? el('div', { class: 'seal' }, sealText(l)) : null],
     failed: el('span', { class: 'bad' }, 'Не выполнена: ' + l.reason),
   })[l.order_status] || el('span', { class: 'bad' }, 'Водитель не назначен');
   const driverCell = (l) => {
@@ -767,6 +779,10 @@ async function renderRequests() {
   const groups = allBases.filter((b) => !reqBase || b === reqBase).map((b) => [b, r.leads.filter((l) => (l.base || 'База не указана') === b)]);
   const free = r.leads.filter((l) => !active(l)).length;
   const sumL = (rows) => rows.reduce((a, l) => a + (l.liters || 0), 0);
+  const legend = r.drivers.map((d) => {
+    const mine = r.leads.filter((l) => active(l) && l.driver_id === d.id);
+    return { ...d, n: mine.length, liters: sumL(mine) };
+  }).filter((d) => d.n);
   const a = r.amo;
   return el('div', null,
     el('div', { class: 'controls' },
@@ -786,12 +802,14 @@ async function renderRequests() {
       d.day.slice(8, 10) + '.' + d.day.slice(5, 7) + ' ', el('small', null, d.n + (d.free ? ` (${d.free} без вод.)` : ''))))) : null,
     r.leads.length ? el('p', { class: 'figures' }, el('b', { id: 'req-total' }, fmt(sumL(r.leads))), ' л, заявок: ', r.leads.length,
       free ? el('span', { class: 'bad' }, ', без водителя: ' + free) : null) : null,
+    legend.length ? el('div', { class: 'drv-legend', id: 'drv-legend' }, legend.map((d) => el('span', { style: '--drv:' + d.color }, el('i'),
+      el('b', null, d.name), ' ' + fmt(d.liters) + ' л · ' + d.n))) : null,
     r.leads.length ? groups.map(([b, rows]) => el('section', null,
       el('div', { class: 'req-base' }, el('h2', null, b), el('span', null, fmt(sumL(rows)) + ' л · заявок: ' + rows.length)),
       el('div', { class: 'scroll' }, el('table', { id: 'requests' },
         el('thead', null, el('tr', null, el('th', null, 'Район и шоссе'), el('th', { class: 'num' }, 'Литры'),
           ['Клиент', 'Телефон', 'Менеджер', 'Особые условия', 'Водитель и газовоз', 'Состояние', ''].map((t) => el('th', null, t)))),
-        el('tbody', null, rows.map((l) => el('tr', { class: active(l) ? null : 'free', 'data-lead': l.lead_id },
+        el('tbody', null, rows.map((l) => el('tr', { class: active(l) ? (l.color ? 'drv' : null) : 'free', style: l.color ? '--drv:' + l.color : null, 'data-lead': l.lead_id },
           el('td', null, el('b', null, l.district), l.highway ? el('div', null, el('small', null, l.highway)) : null),
           el('td', { class: 'num' }, l.liters ? fmt(l.liters) : el('span', { class: 'bad' }, 'нет')),
           el('td', null, l.client, l.address ? el('div', null, el('small', null, l.address)) : null), el('td', { class: 'phone' }, phones(l.phone)),
@@ -1183,12 +1201,12 @@ function renderDrivers() {
     { name: 'name', label: 'ФИО', value: d ? d.name : '' },
     { name: 'login', label: 'Логин для приложения', value: d ? d.login : '' },
     { name: 'password', label: d && d.has_password ? 'Новый пароль (пусто — не менять)' : 'Пароль, от 8 символов', type: 'password' },
-  ], d ? 'Сохранить' : 'Добавить водителя', (v) => api('/api/logist/drivers', 'POST', { id: d ? d.id : undefined, name: v.name, login: v.login, password: v.password || undefined, active: d ? !!d.active : true }));
+  ].concat(d ? [{ name: 'color', label: 'Цвет на доске заявок', type: 'color', value: d.color }] : []), d ? 'Сохранить' : 'Добавить водителя', (v) => api('/api/logist/drivers', 'POST', { id: d ? d.id : undefined, name: v.name, login: v.login, password: v.password || undefined, active: d ? !!d.active : true, color: d ? v.color : undefined }));
   return el('div', null, el('div', { class: 'controls' }, el('button', { class: 'primary', id: 'add-driver', onclick: () => edit(null) }, 'Добавить водителя')),
     el('p', { class: 'note' }, 'Водитель входит в приложение по логину и паролю один раз. Смена пароля выводит его из приложения на всех телефонах.'),
     refs.drivers.length ? el('div', { class: 'scroll' }, el('table', { id: 'drivers' },
-      el('thead', null, el('tr', null, ['ФИО', 'Логин', 'Вход в приложение', ''].map((t) => el('th', null, t)))),
-      el('tbody', null, refs.drivers.map((d) => el('tr', { class: d.active ? null : 'off' }, el('td', null, d.name), el('td', null, d.login),
+      el('thead', null, el('tr', null, ['ФИО', 'Цвет', 'Логин', 'Вход в приложение', ''].map((t) => el('th', null, t)))),
+      el('tbody', null, refs.drivers.map((d) => el('tr', { class: d.active ? null : 'off' }, el('td', null, d.name), el('td', null, el('span', { class: 'swatch', style: '--drv:' + d.color, title: d.color })), el('td', null, d.login),
         el('td', null, d.login && d.has_password ? 'Есть' : el('span', { class: 'bad' }, 'Задайте логин и пароль')),
         el('td', null, el('div', { class: 'actions' }, el('button', { onclick: () => edit(d) }, 'Изменить'),
           d.login ? el('button', { onclick: async () => { try { await api('/api/logist/drivers', 'POST', { id: d.id, name: d.name, login: d.login, active: !d.active }); render(); } catch (err) { confirmBox(err.message, 'Понятно', async () => {}); } } }, d.active ? 'Отключить' : 'Включить') : null)))))))

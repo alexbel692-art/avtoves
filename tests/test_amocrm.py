@@ -220,6 +220,7 @@ def test_amocrm_requests_to_driver_app(env):
     assert call(public, "/api/app/sync", "POST", {"ops": [op]}, token)[1]["results"][0]["ok"]
     lead = [l for l in board(public, logist, day)["leads"] if l["lead_id"] == 31865331][0]
     assert (lead["order_status"], lead["fact"], lead["paid"], lead["plate"]) == ("done", 3980.0, "yes", "Т100АА26")
+    assert (lead["seal"], lead["warranty"], lead["color"]) == ("", None, "#1d5fbf")     # старое приложение: не указано
     code, res = call(public, "/api/logist/amo/assign", "POST", {"lead_id": 31865331, "driver_id": 2}, logist)
     assert code == 400 and "выполнена" in res["error"]
 
@@ -470,3 +471,92 @@ def test_driver_calls_client_and_opens_yandex_navigator(env):
             ["navi", "", "Солнечногорский, Ленинградское шоссе"], ["maps", "55.75,37.62", ""]]
         browser.close()
     assert errors == []
+
+
+def test_driver_colors_seal_and_warranty(env):
+    """Свой цвет у каждого водителя на доске заявок; пломба и гарантийный талон в выгрузке."""
+    from playwright.sync_api import expect, sync_playwright
+    from test_v2 import APP_HTML, PASSWORD
+    ctx, local, public, logist = env
+    day = datetime.now().strftime("%Y-%m-%d")
+    ctx.amocrm.opener = FakeAmo(day)
+    call(public, "/api/logist/amocrm", "POST", {"domain": "rosavtonomg", "token": TOKEN, "enabled": True}, ctx.admin)
+    call(public, "/api/logist/amo/sync", "POST", token=logist)
+    # Цвета разные сразу; администратор может поменять
+    colors = {d["name"]: d["color"] for d in call(public, "/api/logist/refs", token=ctx.admin)[1]["drivers"]}
+    assert colors == {"Иванов Сергей": "#1d5fbf", "Петров Пётр": "#e8590c"}
+    assert call(public, "/api/logist/drivers", "POST", {"name": "Новый Водитель", "login": "novyi", "password": PASSWORD},
+                ctx.admin)[0] == 200
+    assert {d["color"] for d in call(public, "/api/logist/refs", token=ctx.admin)[1]["drivers"]} == {"#1d5fbf", "#e8590c", "#2b8a3e"}
+    assert call(public, "/api/logist/drivers", "POST", {"id": 2, "name": "Петров Пётр", "login": "petrov", "color": "red"},
+                ctx.admin)[0] == 400
+    assert call(public, "/api/logist/drivers", "POST", {"id": 2, "name": "Петров Пётр", "login": "petrov", "color": "#AE3EC9"},
+                ctx.admin)[0] == 200
+    for lid, did in ((31865331, 1), (31611863, 2), (31603247, 1)):
+        assert call(public, "/api/logist/amo/assign", "POST", {"lead_id": lid, "driver_id": did}, logist)[0] == 200
+    b = call(public, f"/api/logist/amo/leads?day={day}", token=logist)[1]
+    assert {l["lead_id"]: l["color"] for l in b["leads"]} == {31603247: "#1d5fbf", 31865331: "#1d5fbf", 31611863: "#ae3ec9"}
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        # Приложение водителя: номер пломбы и галочка «Гарантийный талон выдан»
+        page = browser.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=2)
+        page.add_init_script("window.Android = { notify() {}, requestPush() {} };")
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(APP_HTML.as_uri())
+        page.fill("#server", public)
+        page.fill("#login", "ivanov")
+        page.fill("#password", PASSWORD)
+        page.click("#enter")
+        page.click("#change-vehicle")
+        page.click("button.pick:has-text('Т100АА26')")
+        page.click("button.pick:has-text('АВ123477')")
+        if page.locator("#vehicle-done").count():
+            page.click("#vehicle-done")
+        page.locator("#orders article", has_text="Новая Москва").locator("button.order-done").click()
+        page.click("#paid-yes")
+        page.fill("#seal", "ГП 004512")
+        page.check("#warranty")
+        page.screenshot(path=SHOTS / "app-seal.png")
+        page.click("#save-unload")
+        expect(page.locator(".toast")).to_contain_text("Выгрузка записана")
+
+        def stored():
+            rows = ctx.db.q("SELECT seal, warranty, liters FROM unloads")
+            return rows[0] if rows else None
+        for _ in range(100):
+            if stored():
+                break
+            time.sleep(0.05)
+        assert dict(stored()) == {"seal": "ГП 004512", "warranty": 1, "liters": 4000.0}
+
+        # Доска логиста: строки водителей в их цветах, легенда, у выполненной — пломба и талон
+        desk = browser.new_page(viewport={"width": 1366, "height": 900})
+        desk.on("pageerror", lambda e: errors.append(str(e)))
+        desk.goto(public + "/logist")
+        desk.fill("#l-login", "olga")
+        desk.fill("#l-pass", "parol-logista")
+        desk.click("#l-enter")
+        desk.click("nav button[data-tab='requests']")
+        expect(desk.locator("tr[data-lead='31611863']")).to_have_class("drv")
+        assert desk.locator("tr[data-lead='31611863']").get_attribute("style") == "--drv:#ae3ec9"
+        expect(desk.locator("#drv-legend span")).to_have_count(2)
+        expect(desk.locator("#drv-legend span").first).to_contain_text("Иванов Сергей")
+        expect(desk.locator("tr[data-lead='31865331']")).to_contain_text("пломба № ГП 004512, талон выдан")
+        desk.screenshot(path=SHOTS / "amocrm-colors.png", full_page=True)
+        # В отчёте выгрузок и в Excel
+        desk.click("nav button[data-tab='report']")
+        expect(desk.locator("#unloads")).to_contain_text("пломба № ГП 004512, талон выдан")
+        browser.close()
+    assert errors == []
+    code, raw = call(public, f"/api/logist/report.xlsx?from={day}&to={day}", token=logist, raw=True)
+    import io as _io
+    from openpyxl import load_workbook
+    sh = load_workbook(_io.BytesIO(raw))["Выгрузки"]
+    assert [c.value for c in sh[1]][-2:] == ["Номер пломбы", "Гарантийный талон"]
+    assert [c.value for c in sh[2]][-2:] == ["ГП 004512", "выдан"]
+    # Логист может исправить пломбу и талон
+    uid = ctx.db.q("SELECT id FROM unloads")[0]["id"]
+    assert call(public, f"/api/logist/unloads/{uid}", "PATCH", {"seal": "ГП 004513", "warranty": False}, logist)[0] == 200
+    assert dict(ctx.db.q("SELECT seal, warranty FROM unloads")[0]) == {"seal": "ГП 004513", "warranty": 0}

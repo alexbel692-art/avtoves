@@ -665,6 +665,9 @@ function renderUnloadForm() {
   const order = orderForUnload;
   const amount = el('input', { id: 'liters', inputmode: 'decimal', autocomplete: 'off', value: order ? String(order.liters) : '' });
   const comment = el('input', { id: 'comment', maxlength: 200 });
+  // Пломба на ёмкости клиента и гарантийный талон — видит логист в отчёте и в заявке
+  const seal = el('input', { id: 'seal', maxlength: 40, autocomplete: 'off', autocapitalize: 'characters' });
+  const warranty = el('input', { type: 'checkbox', id: 'warranty' });
   // Частное лицо платит на месте: водитель отмечает, получил ли оплату
   let paid = null;
   const payButtons = [
@@ -688,6 +691,7 @@ function renderUnloadForm() {
     const op = {
       type: 'unload', id: uuid(), plate: data.plate, trailer: data.trailer, liters: litersValue,
       at: now.toISOString(), day: localDate(now), comment: comment.value.trim(), client_label: label,
+      seal: seal.value.trim(), warranty: warranty.checked,
     };
     if (clientId) op.client_id = clientId; else op.client_name = label;
     if (order) op.order_id = order.id;
@@ -740,6 +744,8 @@ function renderUnloadForm() {
     order ? el('button', { type: 'button', onclick: () => { amount.value = String(order.liters); } }, 'Как в заказе: ' + fmt(order.liters) + ' л') : null,
     left !== null && left > 0 ? el('button', { type: 'button', id: 'all-left', onclick: () => { amount.value = String(left); } }, 'Весь остаток: ' + fmt(left) + ' л') : null),
   payWrap,
+  el('label', { for: 'seal' }, 'Номер пломбы'), seal,
+  el('label', { class: 'check-row', for: 'warranty' }, warranty, el('span', null, 'Гарантийный талон выдан')),
   el('label', { for: 'comment' }, 'Комментарий, если нужен'), comment,
   error);
   payWrap.hidden = !isPrivate();
