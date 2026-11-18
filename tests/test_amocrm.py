@@ -33,11 +33,11 @@ class FakeAmo:
             31613683: self.lead(31613683, None, "Истринский", "Новорижское шоссе", "Онуфриево", "2800", "", 505, 11, now),
         }
         self.contacts = {
-            501: ("[Д] Новая Москва  -  Виталий", ["+79671239000"]),
-            502: ("[Д] Солнечногорский  -  Ирина", ["+79166814775", "89166814775"]),
+            501: ("[Д] Новая Москва  -  Виталий", ["+79004445566"]),
+            502: ("[Д] Солнечногорский  -  Ирина", ["+79001112233", "89001112233"]),
             503: ("[Д] Раменский  -  Олег", ["+79260000003"]),
-            504: ("[Д] Можайский  -  Денис", ["89264111586"]),
-            505: ("[Д] Истринский  -  Ольга", ["89150007189"]),
+            504: ("[Д] Можайский  -  Денис", ["89002223344"]),
+            505: ("[Д] Истринский  -  Ольга", ["89007778899"]),
         }
 
     @staticmethod
@@ -155,10 +155,10 @@ def test_amocrm_requests_to_driver_app(env):
     rows = [(l["base"], l["district"], l["highway"], l["liters"], l["client"], l["phone"], l["manager"]) for l in b["leads"]]
     assert rows == [
         ("Мотяково", "Раменский", "Рязанское шоссе", 3500.0, "[Д] Раменский - Олег", "+79260000003", "Красиков Иван Геннадьевич"),
-        ("Онуфриево", "Новая Москва", "Калужское шоссе", 4000.0, "[Д] Новая Москва - Виталий", "+79671239000",
+        ("Онуфриево", "Новая Москва", "Калужское шоссе", 4000.0, "[Д] Новая Москва - Виталий", "+79004445566",
          "Красиков Иван Геннадьевич"),
         ("Онуфриево", "Солнечногорский", "Ленинградское шоссе", 2000.0, "[Д] Солнечногорский - Ирина",
-         "+79166814775, 89166814775", "Захарченко Никита Алексеевич"),
+         "+79001112233, 89001112233", "Захарченко Никита Алексеевич"),
     ]
     assert b["leads"][0]["url"] == "https://rosavtonomg.amocrm.ru/leads/detail/31603247"
     assert [d["name"] for d in b["drivers"]] == ["Иванов Сергей", "Петров Пётр"]
@@ -176,8 +176,8 @@ def test_amocrm_requests_to_driver_app(env):
     me = call(public, "/api/app/me", token=token)[1]
     (o,) = me["orders"]
     assert (o["client"], o["liters"], o["day"], o["phone"], bool(o["private"])) == (
-        "[Д] Солнечногорский - Ирина", 2000.0, day, "+79166814775, 89166814775", True)
-    assert o["note"] == ("Тел.: +79166814775, 89166814775. Шланг 50м, желательна первая половина дня! "
+        "[Д] Солнечногорский - Ирина", 2000.0, day, "+79001112233, 89001112233", True)
+    assert o["note"] == ("Тел.: +79001112233, 89001112233. Шланг 50м, желательна первая половина дня! "
                          "Менеджер: Захарченко Никита Алексеевич")
     lead = [l for l in board(public, logist, day)["leads"] if l["lead_id"] == 31611863][0]
     assert (lead["order_status"], lead["driver"]) == ("new", "Иванов Сергей")
@@ -189,7 +189,7 @@ def test_amocrm_requests_to_driver_app(env):
     assert call(public, "/api/app/me", token=token)[1]["orders"] == []
     assert len(call(public, "/api/app/me", token=other)[1]["orders"]) == 1
     clients = [c for c in call(public, "/api/logist/refs", token=logist)[1]["clients"] if c["name"].startswith("[Д]")]
-    assert len(clients) == 1 and clients[0]["private"] == 1 and clients[0]["phone"] == "+79166814775, 89166814775"
+    assert len(clients) == 1 and clients[0]["private"] == 1 and clients[0]["phone"] == "+79001112233, 89001112233"
 
     # Сделку поменяли в amoCRM: водитель видит новые литры; закрыли — заказ снимается
     fake.update(31611863, fields={F_LITERS: "2500"})
@@ -454,11 +454,11 @@ def test_driver_calls_client_and_opens_yandex_navigator(env):
 
         # Два номера — выбор, один номер — сразу набор
         first.locator("button.call").click()
-        expect(page.locator(".sheet .pick-app")).to_have_text(["+79166814775", "89166814775"])
+        expect(page.locator(".sheet .pick-app")).to_have_text(["+79001112233", "89001112233"])
         page.screenshot(path=SHOTS / "app-call-pick.png")
         page.click("#call-1")
         second.locator("button.call").click()
-        assert page.evaluate("window.Android.calls") == ["89166814775", "+79260000003"]
+        assert page.evaluate("window.Android.calls") == ["89001112233", "+79260000003"]
 
         # Маршрут: без координат — по адресу, с координатами — в точку; Навигатор или Карты на выбор
         first.locator("button.nav").click()
